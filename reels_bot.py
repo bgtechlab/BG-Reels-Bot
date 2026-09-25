@@ -921,6 +921,7 @@ def send_to_buffer(video_url, product_data, ai_data, buy_url):
         metadata = {}
         
         if service == "instagram":
+            # pehle reel try, agar Buffer reject kare to simple video
             metadata = {
                 "instagram": {
                     "type": "reel",

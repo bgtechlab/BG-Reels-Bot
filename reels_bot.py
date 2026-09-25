@@ -306,21 +306,23 @@ Return STRICTLY VALID JSON only (no markdown):
     for idx, api_key in enumerate(gemini_keys, 1):
         try:
             logging.info(f"🤖 Trying Gemini API key #{idx}...")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
-            }
-            res = requests.post(url, json=payload, timeout=45)
-            if res.status_code == 200:
-                data = res.json()
-                raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
-                result = json.loads(clean_json)
-                logging.info("✅ Gemini se script mil gaya!")
-                return result
-            else:
-                logging.warning(f"⚠️ Gemini key #{idx} failed: {res.status_code} {res.text[:200]}")
+            models_to_try = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+            for model_name in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
+                }
+                res = requests.post(url, json=payload, timeout=45)
+                if res.status_code == 200:
+                    data = res.json()
+                    raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
+                    result = json.loads(clean_json)
+                    logging.info(f"✅ Gemini ({model_name}) se script mil gaya!")
+                    return result
+                else:
+                    logging.warning(f"⚠️ Gemini key #{idx} model {model_name}: {res.status_code} {res.text[:150]}")
         except Exception as e:
             logging.warning(f"⚠️ Gemini key #{idx} error: {e}")
 

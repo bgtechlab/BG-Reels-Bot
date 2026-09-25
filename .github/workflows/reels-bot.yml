@@ -1,7 +1,6 @@
 name: BG Reels Bot - Multi-Platform Auto Publisher
 
 on:
-  # OPTION 1: GitHub Actions page se manually product link daal kar run karo
   workflow_dispatch:
     inputs:
       product_url:
@@ -9,7 +8,6 @@ on:
         required: false
         type: string
 
-  # OPTION 2: Har 5 min me khud check karta hai ki Telegram bot pe naya link aaya kya
   schedule:
     - cron: "*/5 * * * *"
 
@@ -69,7 +67,7 @@ jobs:
       - name: Python deps install
         run: pip install -r requirements.txt
 
-            - name: Reel banao aur Buffer ke through publish karo
+      - name: Reel banao aur Buffer ke through publish karo
         env:
           PRODUCT_URL: ${{ needs.resolve-url.outputs.url }}
           BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}

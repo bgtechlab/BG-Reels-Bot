@@ -682,122 +682,113 @@ def upload_video_for_direct_link(video_path):
     logging.info(f"📁 Video size: {file_size/1024/1024:.2f} MB")
     filename = os.path.basename(video_path)
 
-    def _is_direct_video(url):
-        """Buffer ke liye URL check — direct video hona chahiye"""
+    def _ok_url(url):
+        """Halka check — Buffer ke liye URL reachable honi chahiye"""
         try:
-            h = requests.head(url, timeout=20, allow_redirects=True, headers={
-                "User-Agent": "Mozilla/5.0"
-            })
-            ct = h.headers.get("content-type", "").lower()
-            if h.status_code == 200 and ("video" in ct or "octet-stream" in ct or "mp4" in ct):
+            r = requests.get(
+                url,
+                headers={"Range": "bytes=0-2048", "User-Agent": "Mozilla/5.0"},
+                timeout=25,
+                stream=True,
+                allow_redirects=True,
+            )
+            if r.status_code in (200, 206):
+                logging.info(f"✅ URL reachable: {url[:80]}...")
                 return True
-            # kuch hosts HEAD block karte hain — GET range try
-            g = requests.get(url, headers={"Range": "bytes=0-1000", "User-Agent": "Mozilla/5.0"}, timeout=20, stream=True)
-            if g.status_code in (200, 206):
-                return True
+            logging.warning(f"⚠️ URL status {r.status_code}: {url[:80]}")
         except Exception as e:
-            logging.warning(f"⚠️ URL verify fail ({url[:50]}...): {e}")
+            logging.warning(f"⚠️ URL check fail: {e}")
         return False
 
-    # ===== HOST 1: pixeldrain (free, reliable) =====
+    # ===== 1) pixeldrain (PUT — sahi method) =====
     try:
         logging.info("📤 Uploading via pixeldrain.com...")
         with open(video_path, "rb") as f:
-            res = requests.post(
-                "https://pixeldrain.com/api/file/" + filename,
+            res = requests.put(
+                f"https://pixeldrain.com/api/file/{filename}",
                 data=f,
-                timeout=300
+                timeout=300,
             )
         if res.status_code in (200, 201):
             data = res.json()
             file_id = data.get("id")
             if file_id:
+                # Buffer ke liye best: direct download
                 direct_url = f"https://pixeldrain.com/api/file/{file_id}?download"
-                if _is_direct_video(direct_url):
+                if _ok_url(direct_url):
                     logging.info(f"🔗 Direct Video URL (pixeldrain): {direct_url}")
                     return direct_url
-                logging.warning("⚠️ pixeldrain URL verify fail")
     except Exception as e:
         logging.warning(f"⚠️ pixeldrain failed: {e}")
 
-    # ===== HOST 2: gofile.io (free) =====
+    # ===== 2) transfer.sh =====
     try:
-        logging.info("📤 Uploading via gofile.io...")
-        # server nikaalo
-        srv = requests.get("https://api.gofile.io/servers", timeout=20).json()
-        server = srv["data"]["servers"][0]["name"]
+        logging.info("📤 Uploading via transfer.sh...")
         with open(video_path, "rb") as f:
-            res = requests.post(
-                f"https://{server}.gofile.io/uploadFile",
-                files={"file": (filename, f)},
-                timeout=300
+            res = requests.put(
+                f"https://transfer.sh/{filename}",
+                data=f,
+                timeout=300,
             )
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("status") == "ok":
-                direct_url = data["data"]["downloadPage"]
-                # gofile direct link try
-                file_id = data["data"].get("fileId") or data["data"].get("id")
-                if file_id:
-                    # content link better for Buffer
-                    content_url = data["data"].get("downloadPage", "")
-                    logging.info(f"🔗 Gofile page: {content_url}")
-                    # gofile ka direct content URL
-                    direct = f"https://{server}.gofile.io/download/web/{file_id}/{filename}"
-                    if _is_direct_video(direct):
-                        logging.info(f"🔗 Direct Video URL (gofile): {direct}")
-                        return direct
+        if res.status_code == 200 and res.text.strip().startswith("http"):
+            direct_url = res.text.strip()
+            if _ok_url(direct_url):
+                logging.info(f"🔗 Direct Video URL (transfer.sh): {direct_url}")
+                return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ gofile failed: {e}")
+        logging.warning(f"⚠️ transfer.sh failed: {e}")
 
-    # ===== HOST 3: Catbox =====
+    # ===== 3) Catbox =====
     try:
         logging.info("📤 Uploading via Catbox.moe...")
         with open(video_path, "rb") as f:
             res = requests.post(
                 "https://catbox.moe/user/api.php",
                 data={"reqtype": "fileupload"},
-                files={"fileToUpload": f},
-                timeout=300
+                files={"fileToUpload": (filename, f, "video/mp4")},
+                timeout=300,
             )
-        if res.status_code == 200 and "files.catbox.moe" in res.text:
-            direct_url = res.text.strip()
-            if _is_direct_video(direct_url):
-                logging.info(f"🔗 Direct Video URL (Catbox): {direct_url}")
-                return direct_url
+        text = (res.text or "").strip()
+        if res.status_code == 200 and text.startswith("https://files.catbox.moe/"):
+            if _ok_url(text):
+                logging.info(f"🔗 Direct Video URL (Catbox): {text}")
+                return text
+            # verify fail bhi ho to try — kabhi HEAD block hota hai
+            logging.info(f"🔗 Direct Video URL (Catbox, no-verify): {text}")
+            return text
+        else:
+            logging.warning(f"⚠️ Catbox response: {res.status_code} {text[:120]}")
     except Exception as e:
         logging.warning(f"⚠️ Catbox failed: {e}")
 
-    # ===== HOST 4: 0x0.st =====
-    try:
-        logging.info("📤 Uploading via 0x0.st...")
-        with open(video_path, "rb") as f:
-            res = requests.post("https://0x0.st", files={"file": f}, timeout=300)
-        if res.status_code == 200 and res.text.startswith("http"):
-            direct_url = res.text.strip()
-            if _is_direct_video(direct_url):
-                logging.info(f"🔗 Direct Video URL (0x0.st): {direct_url}")
-                return direct_url
-    except Exception as e:
-        logging.warning(f"⚠️ 0x0.st failed: {e}")
-
-    # ===== HOST 5: Litterbox 72h =====
+    # ===== 4) Litterbox 72h =====
     try:
         logging.info("📤 Uploading via Litterbox...")
         with open(video_path, "rb") as f:
             res = requests.post(
                 "https://litterbox.catbox.moe/resources/internals/api.php",
                 data={"reqtype": "fileupload", "time": "72h"},
-                files={"fileToUpload": f},
-                timeout=300
+                files={"fileToUpload": (filename, f, "video/mp4")},
+                timeout=300,
             )
-        if res.status_code == 200 and res.text.startswith("http"):
-            direct_url = res.text.strip()
-            if _is_direct_video(direct_url):
-                logging.info(f"🔗 Direct Video URL (Litterbox): {direct_url}")
-                return direct_url
+        text = (res.text or "").strip()
+        if res.status_code == 200 and text.startswith("http"):
+            logging.info(f"🔗 Direct Video URL (Litterbox): {text}")
+            return text
     except Exception as e:
         logging.warning(f"⚠️ Litterbox failed: {e}")
+
+    # ===== 5) 0x0.st =====
+    try:
+        logging.info("📤 Uploading via 0x0.st...")
+        with open(video_path, "rb") as f:
+            res = requests.post("https://0x0.st", files={"file": (filename, f)}, timeout=300)
+        text = (res.text or "").strip()
+        if res.status_code == 200 and text.startswith("http"):
+            logging.info(f"🔗 Direct Video URL (0x0.st): {text}")
+            return text
+    except Exception as e:
+        logging.warning(f"⚠️ 0x0.st failed: {e}")
 
     logging.error("❌ Koi bhi free host se direct video URL nahi mila!")
     notify_telegram("❌ Video upload fail — koi free host Buffer-compatible URL nahi de paya.")

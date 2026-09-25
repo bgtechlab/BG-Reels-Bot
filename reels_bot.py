@@ -668,100 +668,94 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
 
 # ================= 9. FREE VIDEO UPLOAD =================
 def upload_video_for_direct_link(video_path):
-    logging.info("☁️ Uploading Video to Cloud for Direct Link...")
-    
+    logging.info("☁️ Uploading Video for Direct Link...")
+
     if not os.path.exists(video_path):
         logging.error("❌ Video file not found!")
         return None
-    
+
     file_size = os.path.getsize(video_path)
     if file_size < 500000:
-        logging.error(f"❌ Video too small ({file_size} bytes). Not uploading.")
+        logging.error(f"❌ Video too small ({file_size} bytes).")
         return None
-    
+
     logging.info(f"📁 Video size: {file_size/1024/1024:.2f} MB")
     filename = os.path.basename(video_path)
 
-    def _ok_url(url):
-        """Halka check — Buffer ke liye URL reachable honi chahiye"""
+    # ===== BEST: GitHub Release (free + Buffer padh leta hai) =====
+    gh_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    gh_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()  # e.g. bgtechlab/BG-Reels-Bot
+
+    if gh_token and gh_repo:
         try:
-            r = requests.get(
-                url,
-                headers={"Range": "bytes=0-2048", "User-Agent": "Mozilla/5.0"},
-                timeout=25,
-                stream=True,
-                allow_redirects=True,
-            )
-            if r.status_code in (200, 206):
-                logging.info(f"✅ URL reachable: {url[:80]}...")
-                return True
-            logging.warning(f"⚠️ URL status {r.status_code}: {url[:80]}")
+            logging.info("📤 Uploading via GitHub Release...")
+            tag = f"reel-{int(time.time())}"
+            headers = {
+                "Authorization": f"Bearer {gh_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+
+            # 1) Create release
+            create_url = f"https://api.github.com/repos/{gh_repo}/releases"
+            release_body = {
+                "tag_name": tag,
+                "name": f"Reel {tag}",
+                "body": "Auto-generated reel for Buffer publish",
+                "draft": False,
+                "prerelease": True,
+            }
+            r = requests.post(create_url, json=release_body, headers=headers, timeout=60)
+            if r.status_code not in (200, 201):
+                logging.warning(f"⚠️ GitHub release create failed: {r.status_code} {r.text[:200]}")
+            else:
+                release = r.json()
+                upload_url = release.get("upload_url", "").split("{")[0]
+                # 2) Upload asset
+                upload_headers = {
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                    "Content-Type": "video/mp4",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                }
+                with open(video_path, "rb") as f:
+                    up = requests.post(
+                        f"{upload_url}?name={filename}",
+                        headers=upload_headers,
+                        data=f,
+                        timeout=300,
+                    )
+                if up.status_code in (200, 201):
+                    asset = up.json()
+                    # browser_download_url public hota hai
+                    direct_url = asset.get("browser_download_url")
+                    if direct_url:
+                        logging.info(f"🔗 Direct Video URL (GitHub Release): {direct_url}")
+                        return direct_url
+                else:
+                    logging.warning(f"⚠️ GitHub asset upload failed: {up.status_code} {up.text[:200]}")
         except Exception as e:
-            logging.warning(f"⚠️ URL check fail: {e}")
-        return False
+            logging.warning(f"⚠️ GitHub Release upload failed: {e}")
+    else:
+        logging.warning("⚠️ GITHUB_TOKEN / GITHUB_REPOSITORY missing — GitHub upload skip")
 
-    # ===== 1) pixeldrain (PUT — sahi method) =====
+    # ===== Fallback: tmpfiles (pehle kaam kiya tha) =====
     try:
-        logging.info("📤 Uploading via pixeldrain.com...")
+        logging.info("📤 Uploading via Tmpfiles.org...")
         with open(video_path, "rb") as f:
-            res = requests.put(
-                f"https://pixeldrain.com/api/file/{filename}",
-                data=f,
-                timeout=300,
-            )
-        if res.status_code in (200, 201):
+            res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": (filename, f)}, timeout=300)
+        if res.status_code == 200:
             data = res.json()
-            file_id = data.get("id")
-            if file_id:
-                # Buffer ke liye best: direct download
-                direct_url = f"https://pixeldrain.com/api/file/{file_id}?download"
-                if _ok_url(direct_url):
-                    logging.info(f"🔗 Direct Video URL (pixeldrain): {direct_url}")
-                    return direct_url
-    except Exception as e:
-        logging.warning(f"⚠️ pixeldrain failed: {e}")
-
-    # ===== 2) transfer.sh =====
-    try:
-        logging.info("📤 Uploading via transfer.sh...")
-        with open(video_path, "rb") as f:
-            res = requests.put(
-                f"https://transfer.sh/{filename}",
-                data=f,
-                timeout=300,
-            )
-        if res.status_code == 200 and res.text.strip().startswith("http"):
-            direct_url = res.text.strip()
-            if _ok_url(direct_url):
-                logging.info(f"🔗 Direct Video URL (transfer.sh): {direct_url}")
+            if data.get("status") == "success":
+                raw_url = data["data"]["url"]
+                # direct download form
+                direct_url = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                logging.info(f"🔗 Direct Video URL (Tmpfiles): {direct_url}")
                 return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ transfer.sh failed: {e}")
+        logging.warning(f"⚠️ Tmpfiles failed: {e}")
 
-    # ===== 3) Catbox =====
-    try:
-        logging.info("📤 Uploading via Catbox.moe...")
-        with open(video_path, "rb") as f:
-            res = requests.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": (filename, f, "video/mp4")},
-                timeout=300,
-            )
-        text = (res.text or "").strip()
-        if res.status_code == 200 and text.startswith("https://files.catbox.moe/"):
-            if _ok_url(text):
-                logging.info(f"🔗 Direct Video URL (Catbox): {text}")
-                return text
-            # verify fail bhi ho to try — kabhi HEAD block hota hai
-            logging.info(f"🔗 Direct Video URL (Catbox, no-verify): {text}")
-            return text
-        else:
-            logging.warning(f"⚠️ Catbox response: {res.status_code} {text[:120]}")
-    except Exception as e:
-        logging.warning(f"⚠️ Catbox failed: {e}")
-
-    # ===== 4) Litterbox 72h =====
+    # ===== Fallback: Litterbox =====
     try:
         logging.info("📤 Uploading via Litterbox...")
         with open(video_path, "rb") as f:
@@ -778,20 +772,8 @@ def upload_video_for_direct_link(video_path):
     except Exception as e:
         logging.warning(f"⚠️ Litterbox failed: {e}")
 
-    # ===== 5) 0x0.st =====
-    try:
-        logging.info("📤 Uploading via 0x0.st...")
-        with open(video_path, "rb") as f:
-            res = requests.post("https://0x0.st", files={"file": (filename, f)}, timeout=300)
-        text = (res.text or "").strip()
-        if res.status_code == 200 and text.startswith("http"):
-            logging.info(f"🔗 Direct Video URL (0x0.st): {text}")
-            return text
-    except Exception as e:
-        logging.warning(f"⚠️ 0x0.st failed: {e}")
-
-    logging.error("❌ Koi bhi free host se direct video URL nahi mila!")
-    notify_telegram("❌ Video upload fail — koi free host Buffer-compatible URL nahi de paya.")
+    logging.error("❌ Koi bhi host se video URL nahi mila!")
+    notify_telegram("❌ Video upload fail ho gaya.")
     return None
 
 # ================= 10. BUFFER CHANNELS + PINTEREST BOARD =================

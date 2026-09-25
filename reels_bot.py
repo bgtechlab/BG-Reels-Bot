@@ -16,15 +16,10 @@ from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
 client = Client()
 
 # ================= 1. CONFIGURATION =================
-# Buffer API Integration Token - environment variable se liya jata hai (hardcode mat karein)
-# Terminal me set karein: setx BUFFER_ACCESS_TOKEN "LhAqrM8B5bJTjX7YzvILlf-Gy1XTqe-gjPkQZidtYLJ"  (Windows)
-# ya: export BUFFER_ACCESS_TOKEN="your_token_here"  (Mac/Linux)
 BUFFER_ACCESS_TOKEN = os.environ.get("BUFFER_ACCESS_TOKEN", "")
-
 OUTPUT_DIR = "generated_reels"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEFAULT_FALLBACK_IMAGE = "https://via.placeholder.com/1080x1920.png?text=Product+Image"
@@ -36,7 +31,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 def notify_telegram(message: str):
-    """Status/error seedha Telegram par bhejta hai. Token/chat id na ho to chup-chaap skip."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
@@ -50,14 +44,16 @@ def notify_telegram(message: str):
     except Exception as e:
         logging.warning(f"⚠️ Telegram notify failed: {e}")
 
-# ================= 2. NATIVE WINDOWS FONT SYSTEM =================
+# ================= 2. FONT SYSTEM =================
 def get_system_font(font_size=55):
     font_paths = [
         "C:\\Windows\\Fonts\\arialbd.ttf",
         "C:\\Windows\\Fonts\\NirmalaB.ttf",
         "C:\\Windows\\Fonts\\seguiemj.ttf",
         "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\segoeui.ttf"
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
     for p in font_paths:
         if os.path.exists(p):
@@ -74,11 +70,10 @@ def sanitize_filename(name):
     clean = re.sub(r'[^\w\s-]', '', name).strip().replace(' ', '_')
     return clean[:30] if clean else "product_reel"
 
-# ================= 3. ADVANCED MULTI-IMAGE SCRAPER =================
+# ================= 3. PRODUCT SCRAPER =================
 def unshorten_amazon_url(url, session):
     if not any(domain in url for domain in ["amzn.to", "link.amazon", "earnkaro", "fktr.in", "linkredirect.in"]):
         return url
-
     try:
         logging.info(f"🔍 Tracing redirect for: {url}")
         res = session.get(url, allow_redirects=True, timeout=15)
@@ -92,7 +87,6 @@ def unshorten_amazon_url(url, session):
                 redirect_url = match.group(1).strip()
                 res = session.get(redirect_url, allow_redirects=True, timeout=15)
                 soup = BeautifulSoup(res.content, "html.parser")
-
         scripts = soup.find_all("script")
         for script in scripts:
             if script.string:
@@ -102,19 +96,14 @@ def unshorten_amazon_url(url, session):
                     res = session.get(redirect_url, allow_redirects=True, timeout=15)
                     soup = BeautifulSoup(res.content, "html.parser")
                     break
-
         if "amazon." in res.url or "flipkart." in res.url:
             logging.info(f"✅ Final Unshortened URL: {res.url[:70]}...")
             return res.url
     except Exception as e:
         logging.warning(f"⚠️ Redirect resolution failed: {e}")
-
     return url
 
 def scrape_bgtechlab_page(url, session):
-    """Apni khud ki bgtechlab.github.io review site ke liye scraper —
-    yeh template HAR category (TV, mobile, audio, fashion, kitchen, etc.) me same rehta hai,
-    isliye yeh function sabhi products ke liye kaam karega."""
     data = {
         "title": "",
         "category": "",
@@ -129,7 +118,6 @@ def scrape_bgtechlab_page(url, session):
         soup = BeautifulSoup(res.content, "html.parser")
         page_text = soup.get_text(" ", strip=True)
 
-        # Title (h1 se, "Review (YYYY)" suffix hata kar)
         h1 = soup.find("h1")
         title = h1.get_text(strip=True) if h1 else ""
         if not title:
@@ -138,18 +126,15 @@ def scrape_bgtechlab_page(url, session):
         title = re.sub(r"\s*Review\s*\(\d{4}\)\s*$", "", title, flags=re.I).strip()
         data["title"] = title[:80] or "Trending Product Deal"
 
-        # Category badge: "TV ✓ Verified Expert Review" jaisa pattern
         cat_match = re.search(r"([\w &]{2,25}?)\s*✓\s*Verified Expert Review", page_text)
         if cat_match:
             data["category"] = cat_match.group(1).strip()
 
-        # Price: "Current Best Deal Price ₹21,999"
         price_match = re.search(r"Current Best Deal Price[^\d₹]*₹\s*([\d,]+)", page_text)
         if price_match:
             data["price"] = f"₹{price_match.group(1)}"
             data["has_real_price"] = True
 
-        # Images: page par jitni bhi asli product images hain (Flipkart/Amazon CDN se)
         image_urls = []
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
@@ -175,7 +160,6 @@ def scrape_bgtechlab_page(url, session):
         data["image"] = final_5[0]
         data["extra_images"] = final_5[:5]
 
-        # Pros ("What We Like") — yeh sabse achhi "features" list hai, kisi bhi category ke liye
         pros_heading = soup.find(string=re.compile(r"What We Like", re.I))
         if pros_heading:
             pros_list = pros_heading.find_parent().find_next("ul")
@@ -188,19 +172,15 @@ def scrape_bgtechlab_page(url, session):
         logging.info(f"✅ BG-TechLab Page Extracted: {data['title']} | Category: {data['category'] or 'N/A'} | Price: {data['price']}")
     except Exception as e:
         logging.error(f"⚠️ BG-TechLab Scraping Error: {e}")
-
     return data
-
 
 def scrape_product_details(url):
     logging.info(f"🔄 Fetching Real Product Data & Multiple Images: {url[:60]}...")
-
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     })
 
-    # Apni khud ki site (bgtechlab.github.io ya koi bhi "products" wala GitHub Pages URL) → dedicated scraper
     if "github.io" in url:
         return scrape_bgtechlab_page(url, session)
 
@@ -213,9 +193,7 @@ def scrape_product_details(url):
         "extra_images": [],
         "features": []
     }
-
     res_url = unshorten_amazon_url(url, session)
-
     try:
         res = session.get(res_url, allow_redirects=True, timeout=20)
         soup = BeautifulSoup(res.content, "html.parser")
@@ -246,8 +224,6 @@ def scrape_product_details(url):
                 data["features"].append(txt)
 
         image_urls = []
-
-        # Flipkart Image Scraper
         all_imgs = soup.find_all("img", {"src": re.compile(r'rukminim[0-9]\.flixcart\.com')})
         for img in all_imgs:
             src = img.get('src') or img.get('data-src') or ""
@@ -256,7 +232,6 @@ def scrape_product_details(url):
                 if high_res not in image_urls:
                     image_urls.append(high_res)
 
-        # Amazon Image Scraper
         if not image_urls:
             amz_imgs = soup.find_all("img", {"src": re.compile(r'm\.media-amazon\.com/images/I/')})
             for img in amz_imgs:
@@ -275,7 +250,6 @@ def scrape_product_details(url):
                 final_5_images.append(img_link)
                 if len(final_5_images) == 5:
                     break
-
         data["image"] = final_5_images[0]
         data["extra_images"] = final_5_images[:5]
 
@@ -285,16 +259,16 @@ def scrape_product_details(url):
             if clean_price: 
                 data["price"] = f"₹{clean_price}"
                 data["has_real_price"] = True
-
     except Exception as e:
         logging.error(f"⚠️ Scraping Error: {e}")
 
-    if not data["title"]: data["title"] = "Trending Gadget Deal"
+    if not data["title"]:
+        data["title"] = "Trending Gadget Deal"
     logging.info(f"✅ Product Extracted: {data['title']} | Price: {data['price']}")
-    logging.info(f"🖼️ Images Prepared ({len(data['extra_images'])} images): {data['extra_images']}")
+    logging.info(f"🖼️ Images Prepared ({len(data['extra_images'])} images)")
     return data
 
-# ================= 4. SCRIPT GENERATOR (ENGLISH/HINGLISH SUBTITLES - 45 SECONDS) =================
+# ================= 4. SCRIPT GENERATOR =================
 def generate_reel_script(product_data):
     logging.info("🤖 Generating Script in Roman English / Hinglish Script (Target: 45 Seconds)...")
     
@@ -310,18 +284,16 @@ def generate_reel_script(product_data):
     PRODUCT: {title}
     PRICE: {price}
     KEY FEATURES / PROS: {features_str}
-
     STRICT RULES:
     1. STRICT DURATION: The script MUST be 100 to 110 words long so speaking duration is EXACTLY 45 SECONDS!
-    2. SCRIPT LANGUAGE: Use ONLY Roman English / Hinglish script (e.g. "Kya aap apne liye ek behtareen {category} dhoond rahe hain..."). Do NOT use Devanagari Hindi text!
+    2. SCRIPT LANGUAGE: Use ONLY Roman English / Hinglish script. Do NOT use Devanagari Hindi text!
     3. NO GREETINGS: ABSOLUTELY NO 'Hello Guys', 'Namaskar', 'Hey Friends'.
-    4. Start IMMEDIATELY with a strong hook question in Hinglish, relevant to this specific PRODUCT CATEGORY (not generic, not always about sound/audio — base it on the actual KEY FEATURES given above).
-    5. Cover the actual KEY FEATURES / PROS listed above, the design/quality, and the special offer price thoroughly — talk about what makes THIS category of product genuinely useful.
-    6. NO EMOJIS in hook_text, key_feature, or cta_text! Use clean text.
-
+    4. Start IMMEDIATELY with a strong hook question in Hinglish.
+    5. Cover the actual KEY FEATURES / PROS listed above.
+    6. NO EMOJIS in hook_text, key_feature, or cta_text!
     Return STRICTLY VALID JSON format:
     {{
-        "script": "Kya aap ek aisi {category} dhoond rahe hain jo aapke paiso ka poora fayda de? Toh yeh {title} aapke liye best option hai. Iske features hai: {features_str}. Iska design bahut hi premium hai jo dekhne walon ko impress kar dega. Bhaari discount ke sath yeh best offer limited time ke liye live hai. Is deal ko miss mat kijiye, abhi check karne ke liye description me diye gaye link par click karein!",
+        "script": "...",
         "caption": "🔥 {title} Deal! Check link in description #deals #{category_tag}",
         "hook_text": "VIRAL DEAL ALERT!",
         "key_feature": "Best Price: {price}",
@@ -347,7 +319,7 @@ def generate_reel_script(product_data):
             "cta_text": "Link in Description!"
         }
 
-# ================= 5. HYBRID VOICE GENERATION (OpenAI.fm + Edge TTS Fallback) =================
+# ================= 5. VOICE GENERATION =================
 def split_script_into_chunks(script, max_chars=MAX_CHUNK_CHARACTERS):
     sentences = re.split(r'([.!?|\n])', script)
     chunks = []
@@ -363,7 +335,6 @@ def split_script_into_chunks(script, max_chars=MAX_CHUNK_CHARACTERS):
             if current_chunk:
                 chunks.append(current_chunk.strip())
             current_chunk = full_sentence
-
     if current_chunk:
         chunks.append(current_chunk.strip())
     return chunks
@@ -417,7 +388,6 @@ def generate_edge_tts_voice(text, output_audio_path):
     async def _save():
         communicate = edge_tts.Communicate(text, voice, rate="+25%")
         await communicate.save(output_audio_path)
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_save())
@@ -427,7 +397,6 @@ def generate_voiceover(text, output_audio_path):
     logging.info("🎙️ Generating AI Voiceover (OpenAI.fm Fable Voice + Edge-TTS Fallback)...")
     temp_dir = os.path.join(OUTPUT_DIR, "temp_voice")
     os.makedirs(temp_dir, exist_ok=True)
-
     chunks = split_script_into_chunks(text, max_chars=MAX_CHUNK_CHARACTERS)
     audio_parts = []
     fable_failed = False
@@ -443,7 +412,6 @@ def generate_voiceover(text, output_audio_path):
                     success = True
                     break
                 time.sleep(2)
-
             if not success:
                 logging.warning("⚠️ OpenAI.fm failed, switching to Edge-TTS Fallback.")
                 fable_failed = True
@@ -466,10 +434,9 @@ def generate_voiceover(text, output_audio_path):
                     else:
                         raise Exception("gTTS ne bhi khali/chhoti audio di")
                 except Exception as e2:
-                    logging.error(f"❌ Voice part {idx} failed completely (OpenAI.fm + Edge TTS + gTTS teeno fail): {e2}")
+                    logging.error(f"❌ Voice part {idx} failed completely: {e2}")
                     notify_telegram(f"❌ Awaaz (TTS) fail ho gayi — teeno tarike fail (Part {idx}).")
                     return False
-
         audio_parts.append(part_filename)
 
     if audio_parts:
@@ -478,7 +445,6 @@ def generate_voiceover(text, output_audio_path):
             for p in audio_parts:
                 clean_p = os.path.abspath(p).replace('\\', '/')
                 f.write(f"file '{clean_p}'\n")
-
         try:
             cmd = [
                 'ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_file,
@@ -499,7 +465,7 @@ def generate_voiceover(text, output_audio_path):
                     except: pass
     return False
 
-# ================= 6. PIL CARD OVERLAY GENERATOR =================
+# ================= 6. TEXT CARD GENERATOR =================
 def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50), text_color=(255, 255, 255), font_size=55, save_name="card.png"):
     clean_txt = remove_emojis(text)
     
@@ -507,7 +473,6 @@ def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50),
     draw = ImageDraw.Draw(img)
     
     font = get_system_font(font_size)
-
     bbox = draw.textbbox((0, 0), clean_txt, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -520,7 +485,7 @@ def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50),
     img.save(path)
     return path
 
-# ================= 7. FFMPEG HELPER FUNCTIONS =================
+# ================= 7. FFMPEG HELPERS =================
 def get_audio_duration(audio_path):
     cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -549,10 +514,9 @@ def download_temp_images(urls):
             logging.error(f"❌ Image Download Error: {e}")
     return local_paths
 
-# ================= 8. FIXED FFMPEG REEL BUILDER =================
+# ================= 8. REEL BUILDER =================
 def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_path):
     logging.info("🎬 Rendering 9:16 Reel with Fixed Image Timing...")
-
     local_imgs = download_temp_images(product_data["extra_images"])
     if not local_imgs:
         logging.error("❌ No product images found!")
@@ -562,47 +526,39 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     num_imgs = len(local_imgs)
     per_img_dur = audio_dur / num_imgs
 
-    # Create overlay cards
     hook_p = create_text_card_image(ai_data["hook_text"], 1000, 160, (220, 20, 50), (255, 255, 255), 60, "hook_card.png")
     price_tag = f"PRICE: {product_data['price']}" if product_data['has_real_price'] else ai_data['key_feature']
     price_p = create_text_card_image(price_tag, 920, 110, (0, 180, 80), (255, 255, 255), 45, "price_card.png")
     cta_p = create_text_card_image(ai_data["cta_text"], 980, 120, (20, 20, 20), (255, 215, 0), 45, "cta_card.png")
 
-    # Subtitles
     phrases = [p.strip() for p in re.split(r'[,.!?|।\n]', ai_data["script"]) if len(p.strip()) > 2]
-    if not phrases: phrases = [ai_data["script"]]
+    if not phrases:
+        phrases = [ai_data["script"]]
     sub_dur = audio_dur / len(phrases)
 
-    # Background
     bg_files = glob.glob("BAground Video*") + glob.glob("baground video*") + glob.glob("background*")
     bg_video = bg_files[0] if bg_files else None
 
     ffmpeg_cmd_inputs = []
     
-    # Input 0: Background
     if bg_video:
         ffmpeg_cmd_inputs.extend(["-stream_loop", "-1", "-i", bg_video])
     else:
         ffmpeg_cmd_inputs.extend(["-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={audio_dur}"])
 
-    # Inputs 1..N: Product Images (without -t to allow individual trimming)
     for img in local_imgs:
         ffmpeg_cmd_inputs.extend(["-loop", "1", "-i", img])
 
-    # Overlay cards inputs
     ffmpeg_cmd_inputs.extend(["-i", hook_p, "-i", price_p, "-i", cta_p])
 
-    # Subtitles inputs
     sub_paths = []
     for i, phrase in enumerate(phrases):
         sub_path = create_text_card_image(phrase, 960, 130, (10, 10, 10), (255, 230, 0), 40, f"sub_{i}.png")
         sub_paths.append(sub_path)
         ffmpeg_cmd_inputs.extend(["-i", sub_path])
 
-    # Audio input
     ffmpeg_cmd_inputs.extend(["-i", audio_path])
 
-    # Calculate input indices
     bg_idx = 0
     img_start_idx = 1
     img_end_idx = num_imgs
@@ -616,14 +572,12 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     fps = 25
     filter_graph = f"[{bg_idx}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,trim=0:{audio_dur},setpts=PTS-STARTPTS[bg];"
 
-    # Process each image with its own duration and zoom effect
     last_v = "bg"
     for i in range(1, num_imgs + 1):
         st = (i - 1) * per_img_dur
         et = i * per_img_dur
         frames = int(per_img_dur * fps)
         
-        # Alternating zoom in/out
         if i % 2 != 0:
             zoom_expr = f"min(zoom+0.0015,1.25)"
         else:
@@ -637,14 +591,10 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
         )
         last_v = next_v
 
-    # Overlay Hook Text
     filter_graph += f"[{last_v}][{hook_idx}:v]overlay=(W-w)/2:140[v1];"
-    # Overlay Price
     filter_graph += f"[v1][{price_idx}:v]overlay=(W-w)/2:1420[v2];"
-    # Overlay CTA
     filter_graph += f"[v2][{cta_idx}:v]overlay=(W-w)/2:1600[v3];"
 
-    # Overlay Subtitles with timing
     curr_v = "v3"
     for i in range(len(phrases)):
         s_idx = sub_start_idx + i
@@ -676,10 +626,9 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     if res.returncode == 0:
-        # Check if video is valid and has sufficient size
         if os.path.exists(output_video_path):
             file_size = os.path.getsize(output_video_path)
-            if file_size < 500000:  # Less than 500KB
+            if file_size < 500000:
                 logging.error(f"❌ Video too small ({file_size} bytes). Rendering failed.")
                 return False
             logging.info(f"✅ Reel Generated Successfully: {output_video_path} ({file_size/1024/1024:.2f} MB)")
@@ -691,7 +640,7 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
         logging.error(f"❌ FFmpeg Error:\n{res.stderr}")
         return False
 
-# ================= 9. UPLOAD & BUFFER GRAPHQL API INTEGRATION =================
+# ================= 9. FREE VIDEO UPLOAD =================
 def upload_video_for_direct_link(video_path):
     logging.info("☁️ Uploading Video to Cloud for Direct Link...")
     
@@ -706,21 +655,47 @@ def upload_video_for_direct_link(video_path):
     
     logging.info(f"📁 Video size: {file_size/1024/1024:.2f} MB")
     
-    # Server 1: Catbox.moe
+    # FREE HOST 1: Catbox.moe (Best)
     try:
         logging.info("📤 Uploading via Catbox.moe (Timeout: 300s)...")
         with open(video_path, 'rb') as f:
             data = {"reqtype": "fileupload"}
             files = {"fileToUpload": f}
             res = requests.post("https://catbox.moe/user/api.php", data=data, files=files, timeout=300)
-            if res.status_code == 200 and res.text.startswith("http"):
+            if res.status_code == 200 and res.text.startswith("https://files.catbox.moe/"):
                 direct_url = res.text.strip()
                 logging.info(f"🔗 Direct Video URL (Catbox): {direct_url}")
                 return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ Catbox Upload Failed ({e}), trying Tmpfiles...")
+        logging.warning(f"⚠️ Catbox Upload Failed ({e})")
 
-    # Server 2: Tmpfiles.org
+    # FREE HOST 2: 0x0.st
+    try:
+        logging.info("📤 Uploading via 0x0.st (Timeout: 300s)...")
+        with open(video_path, 'rb') as f:
+            res = requests.post("https://0x0.st", files={"file": f}, timeout=300)
+            if res.status_code == 200 and res.text.startswith("http"):
+                direct_url = res.text.strip()
+                logging.info(f"🔗 Direct Video URL (0x0.st): {direct_url}")
+                return direct_url
+    except Exception as e:
+        logging.warning(f"⚠️ 0x0.st Upload Failed ({e})")
+
+    # FREE HOST 3: Litterbox (72 hours)
+    try:
+        logging.info("📤 Uploading via Litterbox (Timeout: 300s)...")
+        with open(video_path, 'rb') as f:
+            data = {"reqtype": "fileupload", "time": "72h"}
+            files = {"fileToUpload": f}
+            res = requests.post("https://litterbox.catbox.moe/resources/internals/api.php", data=data, files=files, timeout=300)
+            if res.status_code == 200 and res.text.startswith("http"):
+                direct_url = res.text.strip()
+                logging.info(f"🔗 Direct Video URL (Litterbox): {direct_url}")
+                return direct_url
+    except Exception as e:
+        logging.warning(f"⚠️ Litterbox Upload Failed ({e})")
+
+    # FREE HOST 4: Tmpfiles (Last)
     try:
         logging.info("📤 Uploading via Tmpfiles.org (Timeout: 300s)...")
         with open(video_path, 'rb') as f:
@@ -733,26 +708,12 @@ def upload_video_for_direct_link(video_path):
                     logging.info(f"🔗 Direct Video URL (Tmpfiles): {direct_url}")
                     return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ Tmpfiles Upload Failed ({e}), trying File.io...")
-
-    # Server 3: File.io
-    try:
-        logging.info("📤 Uploading via File.io (Timeout: 300s)...")
-        with open(video_path, 'rb') as f:
-            res = requests.post("https://file.io", files={"file": f}, timeout=300)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("success"):
-                    direct_url = data["link"]
-                    logging.info(f"🔗 Direct Video URL (File.io): {direct_url}")
-                    return direct_url
-    except Exception as e:
-        logging.error(f"❌ File.io Upload Error: {e}")
-
+        logging.error(f"❌ All free upload hosts failed: {e}")
+    
     return None
 
+# ================= 10. BUFFER CHANNELS + PINTEREST BOARD =================
 def get_buffer_channels():
-    """Buffer GraphQL API से Organization ID निकालकर Channels Fetch करता है"""
     url = "https://api.buffer.com"
     headers = {
         "Authorization": f"Bearer {BUFFER_ACCESS_TOKEN}",
@@ -778,21 +739,29 @@ def get_buffer_channels():
         if "errors" in res_data:
             logging.error(f"❌ Buffer GraphQL Org Error: {res_data['errors']}")
             return []
-
+            
         orgs = res_data.get("data", {}).get("account", {}).get("organizations", [])
         if not orgs:
             logging.error("❌ No Organization found in your Buffer Account.")
             return []
-
+            
         org_id = orgs[0]["id"]
         logging.info(f"🏢 Found Organization: {orgs[0].get('name')} (ID: {org_id})")
-
+        
         channels_query = """
         query GetChannels($input: ChannelsInput!) {
           channels(input: $input) {
             id
             service
             name
+            metadata {
+              ... on PinterestMetadata {
+                boards {
+                  serviceId
+                  name
+                }
+              }
+            }
           }
         }
         """
@@ -802,39 +771,55 @@ def get_buffer_channels():
                 "organizationId": org_id
             }
         }
-
+        
         res_ch = requests.post(url, json={"query": channels_query, "variables": variables}, headers=headers, timeout=20)
         ch_data = res_ch.json()
-
+        
         if "errors" in ch_data:
             logging.error(f"❌ Buffer Channels Error: {ch_data['errors']}")
             return []
-
+            
         channels = ch_data.get("data", {}).get("channels", [])
         channel_details = []
+        
         for ch in channels:
+            service = ch.get("service", "").lower()
+            board_id = None
+            
+            if service == "pinterest":
+                boards = []
+                meta = ch.get("metadata")
+                if meta and isinstance(meta, dict):
+                    boards = meta.get("boards", [])
+                if boards:
+                    board_id = boards[0].get("serviceId")
+                    logging.info(f"📌 Pinterest Board selected: {boards[0].get('name')} (ID: {board_id})")
+                else:
+                    logging.warning(f"⚠️ Pinterest channel '{ch.get('name')}' me koi board nahi mila!")
+            
             channel_details.append({
                 "id": ch["id"],
-                "service": ch.get("service", "").lower(),
-                "name": ch.get("name", "Unknown Channel")
+                "service": service,
+                "name": ch.get("name", "Unknown Channel"),
+                "board_id": board_id
             })
-            logging.info(f"📱 Channel Found: {ch.get('name')} ({ch.get('service')})")
+            logging.info(f"📱 Channel Found: {ch.get('name')} ({service})")
         
         return channel_details
-
+        
     except Exception as e:
         logging.error(f"⚠️ Buffer Profiles Exception: {e}")
         return []
 
+# ================= 11. SEND TO BUFFER =================
 def send_to_buffer(video_url, product_data, ai_data, buy_url):
-    """Buffer GraphQL API से Reel पोस्ट करता है (Strict Error & Post ID Check ke sath)"""
     logging.info("🚀 Publishing Reel via Buffer GraphQL API...")
     
     channels = get_buffer_channels()
     if not channels:
         logging.error("❌ No Buffer channels found! Check your BUFFER_ACCESS_TOKEN.")
         return
-
+        
     url = "https://api.buffer.com"
     headers = {
         "Authorization": f"Bearer {BUFFER_ACCESS_TOKEN}",
@@ -857,14 +842,15 @@ def send_to_buffer(video_url, product_data, ai_data, buy_url):
       }
     }
     """
-
+    
     for ch in channels:
         c_id = ch["id"]
         service = ch["service"]
         ch_name = ch["name"]
+        board_id = ch.get("board_id")
         
-        # Determine service-specific metadata for Reels/Shorts
         metadata = {}
+        
         if service == "instagram":
             metadata = {
                 "instagram": {
@@ -878,11 +864,21 @@ def send_to_buffer(video_url, product_data, ai_data, buy_url):
                     "type": "reel"
                 }
             }
+        elif service == "pinterest":
+            if not board_id:
+                logging.error(f"❌ Skipping Pinterest ({ch_name}) — No board selected")
+                continue
+            metadata = {
+                "pinterest": {
+                    "boardServiceId": board_id,
+                    "title": product_data.get("title", "Deal")[:100]
+                }
+            }
         elif service == "youtube":
             metadata = {
                 "youtube": {
                     "title": product_data.get("title", "Trending Tech Reel")[:90],
-                    "categoryId": "28"  # Science & Technology
+                    "categoryId": "28"
                 }
             }
         elif service == "tiktok":
@@ -891,7 +887,7 @@ def send_to_buffer(video_url, product_data, ai_data, buy_url):
                     "isAiGenerated": False
                 }
             }
-
+        
         variables = {
             "input": {
                 "channelId": c_id,
@@ -910,34 +906,33 @@ def send_to_buffer(video_url, product_data, ai_data, buy_url):
         
         if metadata:
             variables["input"]["metadata"] = metadata
-
+        
         try:
             res = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=30)
             res_json = res.json()
-
-            # Handle top-level GraphQL errors (e.g., SchedulingType issues)
+            
             if "errors" in res_json and "SchedulingType" in str(res_json):
                 variables["input"]["schedulingType"] = "notification"
                 res = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=30)
                 res_json = res.json()
-
+            
             create_result = res_json.get("data", {}).get("createPost", {})
-
+            
             if create_result.get("post", {}).get("id"):
-                logging.info(f"🎉 Reel Successfully Sent to Channel ID: {c_id} ({ch_name}) (Post ID: {create_result['post']['id']})")
+                logging.info(f"🎉 Reel Successfully Sent to {ch_name} ({service}) | Post ID: {create_result['post']['id']}")
             elif create_result.get("message"):
-                logging.error(f"❌ Buffer Post Failed for {c_id} ({ch_name}): {create_result['message']}")
+                logging.error(f"❌ Buffer Post Failed for {ch_name} ({service}): {create_result['message']}")
             else:
-                logging.error(f"❌ Buffer Post Failed for {c_id} ({ch_name}): Unexpected response: {res_json}")
+                logging.error(f"❌ Buffer Post Failed for {ch_name} ({service}): Unexpected → {res_json}")
+                
         except Exception as e:
-            logging.error(f"⚠️ Buffer GraphQL Post Exception for {c_id} ({ch_name}): {e}")
+            logging.error(f"⚠️ Buffer GraphQL Post Exception for {ch_name}: {e}")
 
-# ================= 10. MAIN WORKFLOW =================
+# ================= 12. MAIN WORKFLOW =================
 async def process_and_publish(buy_url):
     logging.info("=" * 60)
     logging.info("🚀 STARTING MULTI-PLATFORM REEL GENERATION PROCESS (BUFFER)")
     logging.info("=" * 60)
-
     notify_telegram(f"🚀 <b>Reel banna shuru hua</b>\n🔗 {buy_url}")
 
     product = scrape_product_details(buy_url)
@@ -971,10 +966,10 @@ async def process_and_publish(buy_url):
             ai_data=ai_data, 
             buy_url=buy_url
         )
-        notify_telegram(f"✅ <b>Reel Buffer ko bhej diya gaya</b> (Instagram/Facebook/Pinterest queue me lag gaya)!\n🎬 {product['title']}")
+        notify_telegram(f"✅ <b>Reel Buffer ko bhej diya gaya</b>!\n🎬 {product['title']}")
     else:
         logging.error("❌ Video Upload failed or Buffer Access Token missing!")
-        notify_telegram("❌ Video upload fail hua ya BUFFER_ACCESS_TOKEN missing hai, Buffer par nahi bheja gaya.")
+        notify_telegram("❌ Video upload fail hua ya BUFFER_ACCESS_TOKEN missing hai.")
 
 async def main():
     print("\n" + "=" * 60)
@@ -986,7 +981,6 @@ async def main():
         buy_url = sys.argv[1].strip()
     if not buy_url:
         buy_url = input("🔗 Enter Product Link: ").strip()
-
     if not buy_url:
         print("❌ No product link provided. Exiting...")
         notify_telegram("⚠️ Koi product link provide nahi hui.")

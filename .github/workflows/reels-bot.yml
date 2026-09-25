@@ -1,0 +1,78 @@
+name: BG Reels Bot - Multi-Platform Auto Publisher
+
+on:
+  # OPTION 1: GitHub Actions page se manually product link daal kar run karo
+  workflow_dispatch:
+    inputs:
+      product_url:
+        description: "Product Review Page URL (bgtechlab.github.io/bgtech/products/...)"
+        required: false
+        type: string
+
+  # OPTION 2: Har 5 min me khud check karta hai ki Telegram bot pe naya link aaya kya
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-url:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.get_url.outputs.article_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: URL nikalo (manual input ya Telegram se)
+        id: get_url
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "article_url=${{ inputs.product_url }}" >> "$GITHUB_OUTPUT"
+          else
+            pip install requests
+            python telegram_check.py
+          fi
+
+      - name: Offset file commit karo (agar Telegram check chala ho)
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name "reels-bot"
+          git config user.email "reels-bot@users.noreply.github.com"
+          git add .telegram_offset || true
+          git diff --cached --quiet || git commit -m "chore: update telegram offset [skip ci]"
+          git push || true
+
+  run-automation:
+    needs: resolve-url
+    if: needs.resolve-url.outputs.url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: System deps (ffmpeg)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Python deps install
+        run: pip install -r requirements.txt
+
+      - name: Reel banao aur Buffer ke through publish karo
+        env:
+          PRODUCT_URL: ${{ needs.resolve-url.outputs.url }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python reels_bot.py

@@ -4,10 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       product_url:
-        description: "Product Review Page URL (bgtechlab.github.io/bgtech/products/...)"
+        description: "Product Review Page URL"
         required: false
         type: string
-
   schedule:
     - cron: "*/5 * * * *"
 
@@ -27,7 +26,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: URL nikalo (manual input ya Telegram se)
+      - name: URL nikalo
         id: get_url
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -40,7 +39,7 @@ jobs:
             python telegram_check.py
           fi
 
-      - name: Offset file commit karo (agar Telegram check chala ho)
+      - name: Offset commit
         if: github.event_name == 'schedule'
         run: |
           git config user.name "reels-bot"
@@ -61,13 +60,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: System deps (ffmpeg)
+      - name: System deps
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Python deps install
+      - name: Python deps
         run: pip install -r requirements.txt
 
-           - name: Reel banao aur Buffer ke through publish karo
+      - name: Run reels bot
         env:
           PRODUCT_URL: ${{ needs.resolve-url.outputs.url }}
           BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}

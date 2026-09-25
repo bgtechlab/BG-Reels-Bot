@@ -1,0 +1,6 @@
+requests
+g4f
+edge-tts
+gTTS
+beautifulsoup4
+Pillow

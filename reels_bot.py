@@ -278,53 +278,56 @@ def generate_reel_script(product_data):
     price = product_data["price"]
     category = product_data.get("category", "") or "product"
     category_tag = re.sub(r'\W+', '', category) or "deals"
-    features_str = " | ".join(product_data["features"]) if product_data["features"] else f"Great quality {category}, trusted brand, best value for money"
+    features_str = " | ".join(product_data["features"]) if product_data["features"] else f"Great quality {category}"
 
-    prompt = f"""You are an expert viral Instagram Reel creator. Write a detailed, engaging 45 SECONDS long script in ROMAN ENGLISH / HINGLISH (English alphabets only) for:
-PRODUCT CATEGORY: {category}
-PRODUCT: {title}
-PRICE: {price}
-KEY FEATURES / PROS: {features_str}
-STRICT RULES:
-1. STRICT DURATION: The script MUST be 100 to 110 words long so speaking duration is EXACTLY 45 SECONDS!
-2. SCRIPT LANGUAGE: Use ONLY Roman English / Hinglish script. Do NOT use Devanagari Hindi text!
-3. NO GREETINGS: ABSOLUTELY NO 'Hello Guys', 'Namaskar', 'Hey Friends'.
-4. Start IMMEDIATELY with a strong hook question in Hinglish.
-5. Cover the actual KEY FEATURES / PROS listed above.
-6. NO EMOJIS in hook_text, key_feature, or cta_text!
-Return STRICTLY VALID JSON only (no markdown):
-{{
-    "script": "...",
-    "caption": "🔥 {title} Deal! Check link in description #deals #{category_tag}",
-    "hook_text": "VIRAL DEAL ALERT!",
-    "key_feature": "Best Price: {price}",
-    "cta_text": "Link in Description!"
-}}"""
+    prompt = f"""...tumhara wahi prompt..."""
 
-    # --- Gemini API (Free) - 2 keys support ---
+    # ========== YAHAN SE GEMINI CODE ==========
     gemini_keys = [k for k in [GEMINI_API_KEY, GEMINI_API_KEY_2] if k]
     for idx, api_key in enumerate(gemini_keys, 1):
         try:
             logging.info(f"🤖 Trying Gemini API key #{idx}...")
-            models_to_try = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+            models_to_try = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-flash-latest"]
             for model_name in models_to_try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
-                }
-                res = requests.post(url, json=payload, timeout=45)
-                if res.status_code == 200:
-                    data = res.json()
-                    raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
-                    result = json.loads(clean_json)
-                    logging.info(f"✅ Gemini ({model_name}) se script mil gaya!")
-                    return result
-                else:
-                    logging.warning(f"⚠️ Gemini key #{idx} model {model_name}: {res.status_code} {res.text[:150]}")
+                for attempt in range(1, 4):
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    payload = {
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.7,
+                            "maxOutputTokens": 2048,
+                            "responseMimeType": "application/json"
+                        }
+                    }
+                    res = requests.post(url, json=payload, timeout=60)
+                    if res.status_code == 503:
+                        logging.warning(f"⚠️ Gemini {model_name} 503, retry {attempt}/3...")
+                        time.sleep(3 * attempt)
+                        continue
+                    if res.status_code == 200:
+                        data = res.json()
+                        raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        clean_json = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
+                        start = clean_json.find("{")
+                        end = clean_json.rfind("}")
+                        if start != -1 and end != -1:
+                            clean_json = clean_json[start:end + 1]
+                        try:
+                            result = json.loads(clean_json)
+                            logging.info(f"✅ Gemini ({model_name}) se script mil gaya!")
+                            return result
+                        except json.JSONDecodeError as je:
+                            logging.warning(f"⚠️ JSON parse fail: {je}")
+                            break
+                    else:
+                        logging.warning(f"⚠️ Gemini {model_name}: {res.status_code} {res.text[:150]}")
+                        break
         except Exception as e:
             logging.warning(f"⚠️ Gemini key #{idx} error: {e}")
+    # ========== YAHAN TAK ==========
+
+    # phir g4f fallback...
+    # phir hardcoded fallback...
 
     # --- g4f fallback ---
     try:

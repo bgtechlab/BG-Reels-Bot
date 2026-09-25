@@ -20,6 +20,8 @@ client = Client()
 
 # ================= 1. CONFIGURATION =================
 BUFFER_ACCESS_TOKEN = os.environ.get("BUFFER_ACCESS_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "").strip()
 OUTPUT_DIR = "generated_reels"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEFAULT_FALLBACK_IMAGE = "https://via.placeholder.com/1080x1920.png?text=Product+Image"
@@ -270,7 +272,7 @@ def scrape_product_details(url):
 
 # ================= 4. SCRIPT GENERATOR =================
 def generate_reel_script(product_data):
-    logging.info("🤖 Generating Script in Roman English / Hinglish Script (Target: 45 Seconds)...")
+    logging.info("🤖 Generating Script (Gemini Free + Fallback)...")
     
     title = product_data["title"]
     price = product_data["price"]
@@ -278,29 +280,53 @@ def generate_reel_script(product_data):
     category_tag = re.sub(r'\W+', '', category) or "deals"
     features_str = " | ".join(product_data["features"]) if product_data["features"] else f"Great quality {category}, trusted brand, best value for money"
 
-    prompt = f"""
-    You are an expert viral Instagram Reel creator. Write a detailed, engaging 45 SECONDS long script in ROMAN ENGLISH / HINGLISH (English alphabets only) for:
-    PRODUCT CATEGORY: {category}
-    PRODUCT: {title}
-    PRICE: {price}
-    KEY FEATURES / PROS: {features_str}
-    STRICT RULES:
-    1. STRICT DURATION: The script MUST be 100 to 110 words long so speaking duration is EXACTLY 45 SECONDS!
-    2. SCRIPT LANGUAGE: Use ONLY Roman English / Hinglish script. Do NOT use Devanagari Hindi text!
-    3. NO GREETINGS: ABSOLUTELY NO 'Hello Guys', 'Namaskar', 'Hey Friends'.
-    4. Start IMMEDIATELY with a strong hook question in Hinglish.
-    5. Cover the actual KEY FEATURES / PROS listed above.
-    6. NO EMOJIS in hook_text, key_feature, or cta_text!
-    Return STRICTLY VALID JSON format:
-    {{
-        "script": "...",
-        "caption": "🔥 {title} Deal! Check link in description #deals #{category_tag}",
-        "hook_text": "VIRAL DEAL ALERT!",
-        "key_feature": "Best Price: {price}",
-        "cta_text": "Link in Description!"
-    }}
-    """
+    prompt = f"""You are an expert viral Instagram Reel creator. Write a detailed, engaging 45 SECONDS long script in ROMAN ENGLISH / HINGLISH (English alphabets only) for:
+PRODUCT CATEGORY: {category}
+PRODUCT: {title}
+PRICE: {price}
+KEY FEATURES / PROS: {features_str}
+STRICT RULES:
+1. STRICT DURATION: The script MUST be 100 to 110 words long so speaking duration is EXACTLY 45 SECONDS!
+2. SCRIPT LANGUAGE: Use ONLY Roman English / Hinglish script. Do NOT use Devanagari Hindi text!
+3. NO GREETINGS: ABSOLUTELY NO 'Hello Guys', 'Namaskar', 'Hey Friends'.
+4. Start IMMEDIATELY with a strong hook question in Hinglish.
+5. Cover the actual KEY FEATURES / PROS listed above.
+6. NO EMOJIS in hook_text, key_feature, or cta_text!
+Return STRICTLY VALID JSON only (no markdown):
+{{
+    "script": "...",
+    "caption": "🔥 {title} Deal! Check link in description #deals #{category_tag}",
+    "hook_text": "VIRAL DEAL ALERT!",
+    "key_feature": "Best Price: {price}",
+    "cta_text": "Link in Description!"
+}}"""
+
+    # --- Gemini API (Free) - 2 keys support ---
+    gemini_keys = [k for k in [GEMINI_API_KEY, GEMINI_API_KEY_2] if k]
+    for idx, api_key in enumerate(gemini_keys, 1):
+        try:
+            logging.info(f"🤖 Trying Gemini API key #{idx}...")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
+            }
+            res = requests.post(url, json=payload, timeout=45)
+            if res.status_code == 200:
+                data = res.json()
+                raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                clean_json = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
+                result = json.loads(clean_json)
+                logging.info("✅ Gemini se script mil gaya!")
+                return result
+            else:
+                logging.warning(f"⚠️ Gemini key #{idx} failed: {res.status_code} {res.text[:200]}")
+        except Exception as e:
+            logging.warning(f"⚠️ Gemini key #{idx} error: {e}")
+
+    # --- g4f fallback ---
     try:
+        logging.info("🤖 Gemini fail, g4f try kar rahe hain...")
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
@@ -310,7 +336,7 @@ def generate_reel_script(product_data):
         return json.loads(clean_json)
     except Exception as e:
         logging.error(f"⚠️ AI Script Error: {e}")
-        notify_telegram(f"⚠️ AI script generation fail ho gayi, fallback script use ho raha hai.\n<code>{e}</code>")
+        notify_telegram(f"⚠️ AI script fail, fallback use.\n<code>{e}</code>")
         return {
             "script": f"Kya aap ek behtareen {category} dhoond rahe hain jisme achhi quality bhi ho aur price bhi sahi ho? Pesh hai {title}! Isme aapko milta hai {features_str}. Yeh dikhne me kafi premium hai aur use karna bhi bahut aasan hai. Is time is par bahut bada price drop offer chal raha hai. Aaj hi is special deal ka fayda uthane ke liye niche description me diye gaye link par visit karein aur apna order place karein!",
             "caption": f"Best Deal on {title}! Check link in description. #deals #{category_tag}",
@@ -654,62 +680,127 @@ def upload_video_for_direct_link(video_path):
         return None
     
     logging.info(f"📁 Video size: {file_size/1024/1024:.2f} MB")
-    
-    # FREE HOST 1: Catbox.moe (Best)
+    filename = os.path.basename(video_path)
+
+    def _is_direct_video(url):
+        """Buffer ke liye URL check — direct video hona chahiye"""
+        try:
+            h = requests.head(url, timeout=20, allow_redirects=True, headers={
+                "User-Agent": "Mozilla/5.0"
+            })
+            ct = h.headers.get("content-type", "").lower()
+            if h.status_code == 200 and ("video" in ct or "octet-stream" in ct or "mp4" in ct):
+                return True
+            # kuch hosts HEAD block karte hain — GET range try
+            g = requests.get(url, headers={"Range": "bytes=0-1000", "User-Agent": "Mozilla/5.0"}, timeout=20, stream=True)
+            if g.status_code in (200, 206):
+                return True
+        except Exception as e:
+            logging.warning(f"⚠️ URL verify fail ({url[:50]}...): {e}")
+        return False
+
+    # ===== HOST 1: pixeldrain (free, reliable) =====
     try:
-        logging.info("📤 Uploading via Catbox.moe (Timeout: 300s)...")
-        with open(video_path, 'rb') as f:
-            data = {"reqtype": "fileupload"}
-            files = {"fileToUpload": f}
-            res = requests.post("https://catbox.moe/user/api.php", data=data, files=files, timeout=300)
-            if res.status_code == 200 and res.text.startswith("https://files.catbox.moe/"):
-                direct_url = res.text.strip()
+        logging.info("📤 Uploading via pixeldrain.com...")
+        with open(video_path, "rb") as f:
+            res = requests.post(
+                "https://pixeldrain.com/api/file/" + filename,
+                data=f,
+                timeout=300
+            )
+        if res.status_code in (200, 201):
+            data = res.json()
+            file_id = data.get("id")
+            if file_id:
+                direct_url = f"https://pixeldrain.com/api/file/{file_id}?download"
+                if _is_direct_video(direct_url):
+                    logging.info(f"🔗 Direct Video URL (pixeldrain): {direct_url}")
+                    return direct_url
+                logging.warning("⚠️ pixeldrain URL verify fail")
+    except Exception as e:
+        logging.warning(f"⚠️ pixeldrain failed: {e}")
+
+    # ===== HOST 2: gofile.io (free) =====
+    try:
+        logging.info("📤 Uploading via gofile.io...")
+        # server nikaalo
+        srv = requests.get("https://api.gofile.io/servers", timeout=20).json()
+        server = srv["data"]["servers"][0]["name"]
+        with open(video_path, "rb") as f:
+            res = requests.post(
+                f"https://{server}.gofile.io/uploadFile",
+                files={"file": (filename, f)},
+                timeout=300
+            )
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("status") == "ok":
+                direct_url = data["data"]["downloadPage"]
+                # gofile direct link try
+                file_id = data["data"].get("fileId") or data["data"].get("id")
+                if file_id:
+                    # content link better for Buffer
+                    content_url = data["data"].get("downloadPage", "")
+                    logging.info(f"🔗 Gofile page: {content_url}")
+                    # gofile ka direct content URL
+                    direct = f"https://{server}.gofile.io/download/web/{file_id}/{filename}"
+                    if _is_direct_video(direct):
+                        logging.info(f"🔗 Direct Video URL (gofile): {direct}")
+                        return direct
+    except Exception as e:
+        logging.warning(f"⚠️ gofile failed: {e}")
+
+    # ===== HOST 3: Catbox =====
+    try:
+        logging.info("📤 Uploading via Catbox.moe...")
+        with open(video_path, "rb") as f:
+            res = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload"},
+                files={"fileToUpload": f},
+                timeout=300
+            )
+        if res.status_code == 200 and "files.catbox.moe" in res.text:
+            direct_url = res.text.strip()
+            if _is_direct_video(direct_url):
                 logging.info(f"🔗 Direct Video URL (Catbox): {direct_url}")
                 return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ Catbox Upload Failed ({e})")
+        logging.warning(f"⚠️ Catbox failed: {e}")
 
-    # FREE HOST 2: 0x0.st
+    # ===== HOST 4: 0x0.st =====
     try:
-        logging.info("📤 Uploading via 0x0.st (Timeout: 300s)...")
-        with open(video_path, 'rb') as f:
+        logging.info("📤 Uploading via 0x0.st...")
+        with open(video_path, "rb") as f:
             res = requests.post("https://0x0.st", files={"file": f}, timeout=300)
-            if res.status_code == 200 and res.text.startswith("http"):
-                direct_url = res.text.strip()
+        if res.status_code == 200 and res.text.startswith("http"):
+            direct_url = res.text.strip()
+            if _is_direct_video(direct_url):
                 logging.info(f"🔗 Direct Video URL (0x0.st): {direct_url}")
                 return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ 0x0.st Upload Failed ({e})")
+        logging.warning(f"⚠️ 0x0.st failed: {e}")
 
-    # FREE HOST 3: Litterbox (72 hours)
+    # ===== HOST 5: Litterbox 72h =====
     try:
-        logging.info("📤 Uploading via Litterbox (Timeout: 300s)...")
-        with open(video_path, 'rb') as f:
-            data = {"reqtype": "fileupload", "time": "72h"}
-            files = {"fileToUpload": f}
-            res = requests.post("https://litterbox.catbox.moe/resources/internals/api.php", data=data, files=files, timeout=300)
-            if res.status_code == 200 and res.text.startswith("http"):
-                direct_url = res.text.strip()
+        logging.info("📤 Uploading via Litterbox...")
+        with open(video_path, "rb") as f:
+            res = requests.post(
+                "https://litterbox.catbox.moe/resources/internals/api.php",
+                data={"reqtype": "fileupload", "time": "72h"},
+                files={"fileToUpload": f},
+                timeout=300
+            )
+        if res.status_code == 200 and res.text.startswith("http"):
+            direct_url = res.text.strip()
+            if _is_direct_video(direct_url):
                 logging.info(f"🔗 Direct Video URL (Litterbox): {direct_url}")
                 return direct_url
     except Exception as e:
-        logging.warning(f"⚠️ Litterbox Upload Failed ({e})")
+        logging.warning(f"⚠️ Litterbox failed: {e}")
 
-    # FREE HOST 4: Tmpfiles (Last)
-    try:
-        logging.info("📤 Uploading via Tmpfiles.org (Timeout: 300s)...")
-        with open(video_path, 'rb') as f:
-            res = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f}, timeout=300)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("status") == "success":
-                    raw_url = data["data"]["url"]
-                    direct_url = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    logging.info(f"🔗 Direct Video URL (Tmpfiles): {direct_url}")
-                    return direct_url
-    except Exception as e:
-        logging.error(f"❌ All free upload hosts failed: {e}")
-    
+    logging.error("❌ Koi bhi free host se direct video URL nahi mila!")
+    notify_telegram("❌ Video upload fail — koi free host Buffer-compatible URL nahi de paya.")
     return None
 
 # ================= 10. BUFFER CHANNELS + PINTEREST BOARD =================

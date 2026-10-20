@@ -4,3 +4,4 @@ edge-tts
 gTTS
 beautifulsoup4
 Pillow
+playwright

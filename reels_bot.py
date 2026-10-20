@@ -402,6 +402,127 @@ def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50),
     return path
 
 
+def wrap_text_to_width(draw, text, font, max_width):
+    """Text ko pixel width ke hisaab se lines me todta hai."""
+    lines, cur = [], ""
+    for word in text.split():
+        trial = f"{cur} {word}".strip()
+        if not cur or draw.textlength(trial, font=font) <= max_width:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+def create_subtitle_card_image(text, width=980, font_size=56, max_lines=2, save_name="sub.png"):
+    """Reel-style subtitle: bada bold text, black outline, rounded semi-transparent box, auto wrap."""
+    clean = remove_emojis(text).upper()
+    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    size = font_size
+    while True:
+        font = get_system_font(size)
+        lines = wrap_text_to_width(probe, clean, font, width - 90)
+        if len(lines) <= max_lines or size <= 34:
+            break
+        size -= 4
+    line_h = int(size * 1.28)
+    height = line_h * len(lines) + 56
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, width - 1, height - 1), radius=36, fill=(0, 0, 0, 190))
+    y = 28
+    for line in lines:
+        tw = d.textlength(line, font=font)
+        d.text(((width - tw) / 2, y), line, font=font, fill=(255, 230, 0, 255),
+               stroke_width=4, stroke_fill=(0, 0, 0, 255))
+        y += line_h
+    path = os.path.join(OUTPUT_DIR, save_name)
+    img.save(path)
+    return path
+
+
+def build_subtitle_phrases(script, max_words=6):
+    """Script ko chhote, padhne layak subtitle tukdon me todta hai (max ~6 words)."""
+    raw = [p.strip() for p in re.split(r"[,.!?|।\n:;]", script) if len(p.strip()) > 1]
+    phrases = []
+    for part in raw:
+        words = part.split()
+        if len(words) <= max_words + 1:
+            phrases.append(part)
+            continue
+        n_chunks = -(-len(words) // max_words)
+        size = -(-len(words) // n_chunks)
+        for i in range(0, len(words), size):
+            phrases.append(" ".join(words[i:i + size]))
+    return phrases or [script]
+
+
+def compute_subtitle_timings(phrases, total_dur):
+    """Har subtitle ka time uski length ke hisaab se (voice ke saath better sync)."""
+    weights = [max(len(p), 4) for p in phrases]
+    total = float(sum(weights))
+    timings, t = [], 0.0
+    for w in weights:
+        d = total_dur * w / total
+        timings.append((round(t, 3), round(t + d, 3)))
+        t += d
+    return timings
+
+
+def capture_page_for_scroll(url, out_path, max_css_height=7000):
+    """Diye gaye page ka mobile-width (1080px) full screenshot leta hai, jise reel me scroll kiya jayega."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logging.warning("⚠️ playwright installed nahi hai, scroll background skip")
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox"])
+            ctx = browser.new_context(
+                viewport={"width": 540, "height": 960},
+                device_scale_factor=2,
+                is_mobile=True,
+                user_agent=("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"),
+            )
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            height = min(int(page.evaluate("document.documentElement.scrollHeight")), max_css_height)
+            # lazy images load karne ke liye neeche tak scroll
+            y = 0
+            while y < height:
+                page.evaluate(f"window.scrollTo(0, {y})")
+                page.wait_for_timeout(120)
+                y += 500
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(500)
+            page.screenshot(path=out_path, full_page=True,
+                            clip={"x": 0, "y": 0, "width": 540, "height": height})
+            browser.close()
+        with Image.open(out_path) as im:
+            im = im.convert("RGB")
+            if im.width != 1080:
+                im = im.resize((1080, int(im.height * 1080 / im.width)))
+            if im.height < 1920:
+                canvas = Image.new("RGB", (1080, 1920), (255, 255, 255))
+                canvas.paste(im, (0, 0))
+                im = canvas
+            im.save(out_path)
+            logging.info(f"🖼️ Scroll page captured: {im.width}x{im.height}")
+        return out_path
+    except Exception as e:
+        logging.warning(f"⚠️ Page capture fail: {e}")
+        return None
+
+
 def get_audio_duration(audio_path):
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", audio_path]
@@ -430,33 +551,37 @@ def download_temp_images(urls):
     return local
 
 
-def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_path):
+def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_path, scroll_image=None):
     logging.info("🎬 Rendering reel...")
-    local_imgs = download_temp_images(product_data["extra_images"])
-    if not local_imgs:
-        logging.error("❌ No images")
-        return False
+    if scroll_image:
+        local_imgs = []
+    else:
+        local_imgs = download_temp_images(product_data["extra_images"])
+        if not local_imgs:
+            logging.error("❌ No images")
+            return False
 
     audio_dur = get_audio_duration(audio_path)
     num_imgs = len(local_imgs)
-    per_img = audio_dur / num_imgs
+    per_img = audio_dur / max(num_imgs, 1)
 
     hook_p = create_text_card_image(ai_data["hook_text"], 1000, 160, (220, 20, 50), (255, 255, 255), 60, "hook.png")
     price_tag = f"PRICE: {product_data['price']}" if product_data.get("has_real_price") else ai_data["key_feature"]
     price_p = create_text_card_image(price_tag, 920, 110, (0, 180, 80), (255, 255, 255), 45, "price.png")
     cta_p = create_text_card_image(ai_data["cta_text"], 980, 120, (20, 20, 20), (255, 215, 0), 45, "cta.png")
 
-    phrases = [p.strip() for p in re.split(r"[,.!?|।\n]", ai_data["script"]) if len(p.strip()) > 2]
-    if not phrases:
-        phrases = [ai_data["script"]]
-    sub_dur = audio_dur / len(phrases)
+    phrases = build_subtitle_phrases(ai_data["script"])
+    timings = compute_subtitle_timings(phrases, audio_dur)
 
-    inputs = ["-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={audio_dur}"]
+    if scroll_image:
+        inputs = ["-loop", "1", "-framerate", "25", "-t", f"{audio_dur}", "-i", scroll_image]
+    else:
+        inputs = ["-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={audio_dur}"]
     for img in local_imgs:
         inputs.extend(["-loop", "1", "-i", img])
     inputs.extend(["-i", hook_p, "-i", price_p, "-i", cta_p])
     for i, ph in enumerate(phrases):
-        sp = create_text_card_image(ph, 960, 130, (10, 10, 10), (255, 230, 0), 40, f"sub_{i}.png")
+        sp = create_subtitle_card_image(ph, save_name=f"sub_{i}.png")
         inputs.extend(["-i", sp])
     inputs.extend(["-i", audio_path])
 
@@ -466,7 +591,11 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     audio_i = sub_start + len(phrases)
     fps = 25
 
-    fg = f"[0:v]scale=1080:1920,trim=0:{audio_dur},setpts=PTS-STARTPTS[bg];"
+    if scroll_image:
+        # website ka lamba screenshot upar se neeche smooth scroll hota hai (poori voice ki length me)
+        fg = f"[0:v]crop=1080:1920:0:'(ih-1920)*t/{audio_dur}',setsar=1,fps={fps}[bg];"
+    else:
+        fg = f"[0:v]scale=1080:1920,trim=0:{audio_dur},setpts=PTS-STARTPTS[bg];"
     last = "bg"
     for i in range(1, num_imgs + 1):
         st, et = (i - 1) * per_img, i * per_img
@@ -485,9 +614,9 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     fg += f"[v2][{cta_i}:v]overlay=(W-w)/2:1600[v3];"
     curr = "v3"
     for i in range(len(phrases)):
-        st, et = i * sub_dur, (i + 1) * sub_dur
+        st, et = timings[i]
         nxt = f"vs{i}"
-        fg += f"[{curr}][{sub_start + i}:v]overlay=(W-w)/2:1180:enable='between(t,{st},{et})'[{nxt}];"
+        fg += f"[{curr}][{sub_start + i}:v]overlay=(W-w)/2:1290-h/2:enable='between(t,{st},{et})'[{nxt}];"
         curr = nxt
     fg = fg.rstrip(";")
 
@@ -732,7 +861,15 @@ async def process_and_publish(buy_url):
     if not generate_voiceover(ai_data["script"], audio_path):
         notify_telegram("❌ Voice fail")
         return
-    if not create_vertical_reel_ffmpeg(product, ai_data, audio_path, video_path):
+
+    # Jo link diya gaya hai, wahi page background me scroll hoga (SCROLL_BACKGROUND=0 se band kar sakte hain)
+    scroll_image = None
+    if os.getenv("SCROLL_BACKGROUND", "1").strip() != "0":
+        scroll_image = capture_page_for_scroll(buy_url, os.path.join(OUTPUT_DIR, f"page_{ts}.png"))
+        if not scroll_image:
+            logging.warning("⚠️ Scroll background nahi bana, product images wala reel banega")
+
+    if not create_vertical_reel_ffmpeg(product, ai_data, audio_path, video_path, scroll_image=scroll_image):
         notify_telegram("❌ Video fail")
         return
 

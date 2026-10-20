@@ -66,6 +66,9 @@ jobs:
       - name: Python deps
         run: pip install -r requirements.txt
 
+      - name: Browser for scrolling background
+        run: python -m playwright install --with-deps chromium
+
       - name: Run reels bot
         env:
           PRODUCT_URL: ${{ needs.resolve-url.outputs.url }}

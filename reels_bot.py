@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from g4f.client import Client
 import edge_tts
 from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageStat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 client = Client()
@@ -507,29 +507,30 @@ def build_caption_track(phrases, timings):
     return list_path
 
 
-def capture_page_for_scroll(url, out_path, max_css_height=7000):
-    """Diye gaye page ka mobile-width (1080px) full screenshot leta hai, jise reel me scroll kiya jayega."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        logging.warning("⚠️ playwright installed nahi hai, scroll background skip")
-        return None
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox"])
+MOBILE_UA = ("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
+
+
+def _capture_once(url, out_path, wait_until, max_css_height):
+    """Ek baar page khol kar upar se neeche tak ka screenshot leta hai (540 css px chaudai, 2x scale = 1080px)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--no-sandbox"])
+        try:
+            # is_mobile=False: viewport meta na ho tab bhi layout theek 540px ka rahe (980px wala zoom-out na ho)
             ctx = browser.new_context(
                 viewport={"width": 540, "height": 960},
                 device_scale_factor=2,
-                is_mobile=True,
-                user_agent=("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"),
+                user_agent=MOBILE_UA,
             )
             page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.goto(url, wait_until=wait_until, timeout=45000)
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
+            page.add_style_tag(content="html{scroll-behavior:auto !important}")
             height = min(int(page.evaluate("document.documentElement.scrollHeight")), max_css_height)
             # lazy images load karne ke liye neeche tak scroll
             y = 0
@@ -538,24 +539,45 @@ def capture_page_for_scroll(url, out_path, max_css_height=7000):
                 page.wait_for_timeout(120)
                 y += 500
             page.evaluate("window.scrollTo(0, 0)")
+            try:  # sab images load hone tak (max 8 sec) ruko
+                page.wait_for_function("Array.from(document.images).every(i => i.complete)", timeout=8000)
+            except Exception:
+                pass
             page.wait_for_timeout(500)
             page.screenshot(path=out_path, full_page=True,
                             clip={"x": 0, "y": 0, "width": 540, "height": height})
+        finally:
             browser.close()
-        with Image.open(out_path) as im:
-            im = im.convert("RGB")
-            if im.width != 1080:
-                im = im.resize((1080, int(im.height * 1080 / im.width)))
-            if im.height < 1920:
-                canvas = Image.new("RGB", (1080, 1920), (255, 255, 255))
-                canvas.paste(im, (0, 0))
-                im = canvas
-            im.save(out_path)
-            logging.info(f"🖼️ Scroll page captured: {im.width}x{im.height}")
-        return out_path
-    except Exception as e:
-        logging.warning(f"⚠️ Page capture fail: {e}")
+
+
+def capture_page_for_scroll(url, out_path, max_css_height=7000):
+    """Diye gaye page ka mobile-width (1080px) full screenshot leta hai, jise reel me scroll kiya jayega.
+    2 baar koshish karta hai; fail ho to None (tab reel product images wala banta hai)."""
+    try:
+        import playwright.sync_api  # noqa: F401
+    except ImportError:
+        logging.warning("⚠️ playwright installed nahi hai, scroll background skip")
         return None
+
+    for attempt, wait_until in enumerate(["domcontentloaded", "load"], 1):
+        try:
+            _capture_once(url, out_path, wait_until, max_css_height)
+            with Image.open(out_path) as im:
+                im = im.convert("RGB")
+                if ImageStat.Stat(im.convert("L")).stddev[0] < 2:
+                    raise RuntimeError("screenshot khali (blank) aaya")
+                if im.width != 1080:
+                    im = im.resize((1080, int(im.height * 1080 / im.width)), Image.LANCZOS)
+                if im.height < 1920:
+                    canvas = Image.new("RGB", (1080, 1920), (255, 255, 255))
+                    canvas.paste(im, (0, 0))
+                    im = canvas
+                im.save(out_path)
+                logging.info(f"🖼️ Scroll page captured: {im.width}x{im.height}")
+            return out_path
+        except Exception as e:
+            logging.warning(f"⚠️ Page capture try {attempt}/2 fail: {e}")
+    return None
 
 
 def get_audio_duration(audio_path):
@@ -1033,9 +1055,17 @@ async def process_and_publish(buy_url):
     # Jo link diya gaya hai, wahi page background me scroll hoga (SCROLL_BACKGROUND=0 se band kar sakte hain)
     scroll_image = None
     if os.getenv("SCROLL_BACKGROUND", "1").strip() != "0":
-        scroll_image = capture_page_for_scroll(buy_url, os.path.join(OUTPUT_DIR, f"page_{ts}.png"))
+        for attempt in (1, 2):
+            scroll_image = capture_page_for_scroll(buy_url, os.path.join(OUTPUT_DIR, f"page_{ts}.png"))
+            if scroll_image:
+                break
+            logging.warning(f"⚠️ Page capture attempt {attempt}/2 fail")
+            time.sleep(3)
         if not scroll_image:
             logging.warning("⚠️ Scroll background nahi bana, product images wala reel banega")
+            notify_telegram("⚠️ Website ka scroll background nahi ban paya, is reel me sirf product images hain.\n"
+                            f"🔗 {buy_url}")
+            notify_telegram("⚠️ Website ka scroll background nahi ban paya, is baar product images wala reel ban raha hai.")
 
     if not create_vertical_reel_ffmpeg(product, ai_data, audio_path, video_path, scroll_image=scroll_image):
         notify_telegram("❌ Video fail")

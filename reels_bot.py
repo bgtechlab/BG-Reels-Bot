@@ -1055,17 +1055,14 @@ async def process_and_publish(buy_url):
     # Jo link diya gaya hai, wahi page background me scroll hoga (SCROLL_BACKGROUND=0 se band kar sakte hain)
     scroll_image = None
     if os.getenv("SCROLL_BACKGROUND", "1").strip() != "0":
-        for attempt in (1, 2):
-            scroll_image = capture_page_for_scroll(buy_url, os.path.join(OUTPUT_DIR, f"page_{ts}.png"))
-            if scroll_image:
-                break
-            logging.warning(f"⚠️ Page capture attempt {attempt}/2 fail")
-            time.sleep(3)
+        # Playwright ka sync API asyncio loop ke andar nahi chalta ("Sync API inside the asyncio loop" error),
+        # isliye capture alag thread me chalate hain. capture_page_for_scroll andar se 2 baar koshish karta hai.
+        scroll_image = await asyncio.to_thread(
+            capture_page_for_scroll, buy_url, os.path.join(OUTPUT_DIR, f"page_{ts}.png"))
         if not scroll_image:
             logging.warning("⚠️ Scroll background nahi bana, product images wala reel banega")
-            notify_telegram("⚠️ Website ka scroll background nahi ban paya, is reel me sirf product images hain.\n"
+            notify_telegram("⚠️ Website ka scroll background nahi ban paya, is baar product images wala reel ban raha hai.\n"
                             f"🔗 {buy_url}")
-            notify_telegram("⚠️ Website ka scroll background nahi ban paya, is baar product images wala reel ban raha hai.")
 
     if not create_vertical_reel_ffmpeg(product, ai_data, audio_path, video_path, scroll_image=scroll_image):
         notify_telegram("❌ Video fail")

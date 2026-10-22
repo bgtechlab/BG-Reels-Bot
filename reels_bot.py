@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from g4f.client import Client
 import edge_tts
 from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 client = Client()
@@ -27,6 +27,14 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEFAULT_FALLBACK_IMAGE = "https://via.placeholder.com/1080x1920.png?text=Product+Image"
 MAX_CHUNK_CHARACTERS = 1000
 MAX_RETRIES = 3
+
+# ---- Reel layout ----
+MAX_IMAGES = 5            # reel me zyada se zyada itni images
+IMG_SHOW_RATIO = 0.65     # har scene me image sirf itne hisse (60-70%) tak dikhti hai, baaki time sirf scroll
+CARD_WIDTH = 648          # 1080 ka 60%
+CARD_PAD = 56             # card ke charo taraf shadow ki jagah
+CARD_CENTER_Y = 780       # image card ka center (caption se upar)
+CAPTION_CENTER_Y = 1305   # caption ka center (image card ke neeche)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -126,17 +134,11 @@ def scrape_bgtechlab_page(url, session):
             og_img = soup.find("meta", {"property": "og:image"})
             if og_img and og_img.get("content"):
                 image_urls = [og_img["content"]]
-        if not image_urls:
-            image_urls = [DEFAULT_FALLBACK_IMAGE]
 
-        final_5 = []
-        while len(final_5) < 5 and image_urls:
-            for link in image_urls:
-                final_5.append(link)
-                if len(final_5) == 5:
-                    break
-        data["image"] = final_5[0]
-        data["extra_images"] = final_5[:5]
+        # sirf alag-alag (unique) images, max 5. Repeat karke 5 nahi banate; kam mili to utne hi scene me image aayegi
+        unique_imgs = list(dict.fromkeys(u for u in image_urls if u and u != DEFAULT_FALLBACK_IMAGE))[:MAX_IMAGES]
+        data["image"] = unique_imgs[0] if unique_imgs else DEFAULT_FALLBACK_IMAGE
+        data["extra_images"] = unique_imgs
 
         pros = soup.find(string=re.compile(r"What We Like", re.I))
         if pros:
@@ -181,22 +183,16 @@ def scrape_product_details(url):
         if not data["title"]:
             data["title"] = "Trending Gadget Deal"
 
-        image_urls = [DEFAULT_FALLBACK_IMAGE]
+        image_urls = []
         og = soup.find("meta", {"property": "og:image"})
         if og and og.get("content"):
             image_urls = [og["content"]]
-        final_5 = []
-        while len(final_5) < 5:
-            for u in image_urls:
-                final_5.append(u)
-                if len(final_5) == 5:
-                    break
-        data["image"] = final_5[0]
-        data["extra_images"] = final_5[:5]
+        data["image"] = image_urls[0] if image_urls else DEFAULT_FALLBACK_IMAGE
+        data["extra_images"] = image_urls[:MAX_IMAGES]
     except Exception as e:
         logging.error(f"⚠️ Scrape error: {e}")
         data["title"] = data.get("title") or "Trending Gadget Deal"
-        data["extra_images"] = [DEFAULT_FALLBACK_IMAGE] * 5
+        data["extra_images"] = []
         data["image"] = DEFAULT_FALLBACK_IMAGE
     return data
 
@@ -390,7 +386,7 @@ def generate_voiceover(text, output_audio_path):
 # ================= 6. CARDS + FFMPEG =================
 def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50),
                            text_color=(255, 255, 255), font_size=55, save_name="card.png"):
-    clean = remove_emojis(text)
+    clean = remove_emojis(text.replace("₹", "Rs "))  # font me ₹ nahi hota, isliye Rs likhte hain
     img = Image.new("RGBA", (width, height), bg_color + (240,))
     draw = ImageDraw.Draw(img)
     font = get_system_font(font_size)
@@ -402,74 +398,113 @@ def create_text_card_image(text, width=1000, height=150, bg_color=(220, 20, 50),
     return path
 
 
-def wrap_text_to_width(draw, text, font, max_width):
-    """Text ko pixel width ke hisaab se lines me todta hai."""
-    lines, cur = [], ""
-    for word in text.split():
-        trial = f"{cur} {word}".strip()
-        if not cur or draw.textlength(trial, font=font) <= max_width:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
-    return lines or [text]
+# ----- Captions: bola ja raha word highlight hota hai -----
+CAPTION_W = 980
+CAPTION_H = 230
+PAUSE_WEIGHTS = {",": 3, ";": 3, ":": 3, "\n": 4, ".": 6, "!": 6, "?": 6, "|": 6, "।": 6}
 
 
-def create_subtitle_card_image(text, width=980, font_size=56, max_lines=2, save_name="sub.png"):
-    """Reel-style subtitle: bada bold text, black outline, rounded semi-transparent box, auto wrap."""
-    clean = remove_emojis(text).upper()
-    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-    size = font_size
-    while True:
-        font = get_system_font(size)
-        lines = wrap_text_to_width(probe, clean, font, width - 90)
-        if len(lines) <= max_lines or size <= 34:
-            break
-        size -= 4
-    line_h = int(size * 1.28)
-    height = line_h * len(lines) + 56
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, width - 1, height - 1), radius=36, fill=(0, 0, 0, 190))
-    y = 28
-    for line in lines:
-        tw = d.textlength(line, font=font)
-        d.text(((width - tw) / 2, y), line, font=font, fill=(255, 230, 0, 255),
-               stroke_width=4, stroke_fill=(0, 0, 0, 255))
-        y += line_h
-    path = os.path.join(OUTPUT_DIR, save_name)
-    img.save(path)
-    return path
-
-
-def build_subtitle_phrases(script, max_words=6):
-    """Script ko chhote, padhne layak subtitle tukdon me todta hai (max ~6 words)."""
-    raw = [p.strip() for p in re.split(r"[,.!?|।\n:;]", script) if len(p.strip()) > 1]
+def build_caption_phrases(script, max_words=6):
+    """Script ko chhote caption phrases me todta hai. Har phrase = [(word, pause_weight), ...]."""
+    script = script.replace("₹", "Rs ")
+    script = re.sub(r"(?<=\d),(?=\d)", "", script)  # 1,299 ko 1299 bana do taaki comma par na tute
+    parts = re.split(r"([,.!?|।\n:;])", script)
     phrases = []
-    for part in raw:
-        words = part.split()
-        if len(words) <= max_words + 1:
-            phrases.append(part)
+    for i in range(0, len(parts), 2):
+        words = remove_emojis(parts[i]).upper().split()
+        if not words:
             continue
-        n_chunks = -(-len(words) // max_words)
-        size = -(-len(words) // n_chunks)
-        for i in range(0, len(words), size):
-            phrases.append(" ".join(words[i:i + size]))
-    return phrases or [script]
+        delim = parts[i + 1] if i + 1 < len(parts) else ""
+        end_pause = PAUSE_WEIGHTS.get(delim, 0)
+        if len(words) <= max_words + 1:
+            chunks = [words]
+        else:
+            n_chunks = -(-len(words) // max_words)
+            size = -(-len(words) // n_chunks)
+            chunks = [words[j:j + size] for j in range(0, len(words), size)]
+        for ci, chunk in enumerate(chunks):
+            pause = end_pause if ci == len(chunks) - 1 else 1
+            phrases.append([(w, pause if wi == len(chunk) - 1 else 0) for wi, w in enumerate(chunk)])
+    return phrases or [[(remove_emojis(script).upper() or "DEAL", 0)]]
 
 
-def compute_subtitle_timings(phrases, total_dur):
-    """Har subtitle ka time uski length ke hisaab se (voice ke saath better sync)."""
-    weights = [max(len(p), 4) for p in phrases]
-    total = float(sum(weights))
+def compute_word_timings(phrases, total_dur):
+    """Har word ka time uski length (aur punctuation ke pause) ke hisaab se -> voice ke saath approx sync."""
+    weights = []
+    for ph in phrases:
+        for w, pause in ph:
+            weights.append(len(re.sub(r"\W", "", w)) + 2 + pause)
+    total = float(sum(weights)) or 1.0
     timings, t = [], 0.0
-    for w in weights:
-        d = total_dur * w / total
-        timings.append((round(t, 3), round(t + d, 3)))
+    for wt in weights:
+        d = total_dur * wt / total
+        timings.append((t, t + d))
         t += d
     return timings
+
+
+def layout_caption(words, max_size=58):
+    """Words ko max 2 lines me baithata hai (zarurat ho to font chhota karke)."""
+    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    size = max_size
+    while True:
+        font = get_system_font(size)
+        space = probe.textlength(" ", font=font)
+        lines, cur, cur_w = [], [], 0.0
+        for i, w in enumerate(words):
+            ww = probe.textlength(w, font=font)
+            add = ww if not cur else space + ww
+            if cur and cur_w + add > CAPTION_W - 90:
+                lines.append(cur)
+                cur, cur_w, add = [], 0.0, ww
+            cur.append((i, ww))
+            cur_w += add
+        if cur:
+            lines.append(cur)
+        if len(lines) <= 2 or size <= 34:
+            return font, size, lines, space
+        size -= 4
+
+
+def render_caption_frame(words, layout, active_idx, save_path):
+    """Poora phrase dikhata hai; sirf active_idx wala word peela (highlight) hota hai."""
+    font, size, lines, space = layout
+    line_h = int(size * 1.28)
+    box_h = line_h * len(lines) + 56
+    img = Image.new("RGBA", (CAPTION_W, CAPTION_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    top = (CAPTION_H - box_h) // 2
+    d.rounded_rectangle((0, top, CAPTION_W - 1, top + box_h - 1), radius=36, fill=(0, 0, 0, 190))
+    y = top + 28
+    for line in lines:
+        line_w = sum(w for _, w in line) + space * (len(line) - 1)
+        x = (CAPTION_W - line_w) / 2
+        for i, ww in line:
+            color = (255, 214, 0, 255) if i == active_idx else (255, 255, 255, 255)
+            d.text((x, y), words[i], font=font, fill=color, stroke_width=4, stroke_fill=(0, 0, 0, 255))
+            x += ww + space
+        y += line_h
+    img.save(save_path)
+
+
+def build_caption_track(phrases, timings):
+    """Har word ke liye ek PNG banata hai aur ffmpeg concat list file likhta hai (ek hi input me poora caption track)."""
+    entries, k = [], 0
+    for pi, ph in enumerate(phrases):
+        words = [w for w, _ in ph]
+        layout = layout_caption(words)
+        for wi in range(len(words)):
+            path = os.path.abspath(os.path.join(OUTPUT_DIR, f"cap_{pi:03d}_{wi:02d}.png")).replace("\\", "/")
+            render_caption_frame(words, layout, wi, path)
+            st, et = timings[k]
+            k += 1
+            entries.append((path, max(et - st, 0.04)))
+    list_path = os.path.join(OUTPUT_DIR, "captions.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for path, dur in entries:
+            f.write(f"file '{path}'\nduration {dur:.3f}\n")
+        f.write(f"file '{entries[-1][0]}'\n")  # concat demuxer ka last frame quirk
+    return list_path
 
 
 def capture_page_for_scroll(url, out_path, max_css_height=7000):
@@ -530,99 +565,121 @@ def get_audio_duration(audio_path):
     return float(result.stdout.strip())
 
 
-def download_temp_images(urls):
-    local = []
+def create_image_card(im, save_path, width=CARD_WIDTH, pad=CARD_PAD, radius=40):
+    """Product image ko gol kone + halki shadow wale (transparent) card me daalta hai."""
+    im = ImageOps.contain(im.convert("RGBA"), (width - 48, width - 48), Image.LANCZOS)
+    canvas_size = width + pad * 2
+
+    shadow = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        (pad, pad + 14, pad + width, pad + width + 14), radius=radius, fill=(0, 0, 0, 90))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(18))
+
+    card = Image.new("RGBA", (width, width), (255, 255, 255, 255))
+    card.paste(im, ((width - im.width) // 2, (width - im.height) // 2), im)
+    mask = Image.new("L", (width, width), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, width - 1), radius=radius, fill=255)
+    shadow.paste(card, (pad, pad), mask)
+    shadow.save(save_path)
+    return save_path
+
+
+def download_card_images(urls):
+    """Har scene ke liye ek entry: card ka path, ya None agar image nahi mili (us scene me sirf scroll chalega)."""
+    cards = []
     headers = {"User-Agent": "Mozilla/5.0"}
-    for i, url in enumerate(urls):
+    for i, url in enumerate(urls[:MAX_IMAGES]):
+        path = None
         try:
             r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code == 200:
-                p = os.path.join(OUTPUT_DIR, f"temp_img_{i}.png")
+            if r.status_code == 200 and len(r.content) > 2000:
                 with Image.open(io.BytesIO(r.content)) as im:
-                    im = im.convert("RGBA")
-                    canvas = Image.new("RGBA", (1020, 1020), (0, 0, 0, 0))
-                    im.thumbnail((1000, 1000))
-                    off = ((1020 - im.width) // 2, (1020 - im.height) // 2)
-                    canvas.paste(im, off)
-                    canvas.save(p)
-                local.append(p)
+                    path = create_image_card(im, os.path.join(OUTPUT_DIR, f"card_{i}.png"))
+            else:
+                logging.warning(f"⚠️ Image {i + 1} nahi mili (status {r.status_code}), scene me sirf scroll")
         except Exception as e:
-            logging.error(f"❌ Image: {e}")
-    return local
+            logging.warning(f"⚠️ Image {i + 1} fail, scene me sirf scroll: {e}")
+        cards.append(path)
+    return cards
 
 
 def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_path, scroll_image=None):
     logging.info("🎬 Rendering reel...")
-    if scroll_image:
-        local_imgs = []
-    else:
-        local_imgs = download_temp_images(product_data["extra_images"])
-        if not local_imgs:
-            logging.error("❌ No images")
-            return False
-
+    fps = 25
     audio_dur = get_audio_duration(audio_path)
-    num_imgs = len(local_imgs)
-    per_img = audio_dur / max(num_imgs, 1)
+
+    urls = [u for u in (product_data.get("extra_images") or []) if u and u != DEFAULT_FALLBACK_IMAGE][:MAX_IMAGES]
+    cards = download_card_images(urls)
+    if not scroll_image and not any(cards):
+        logging.error("❌ Na scroll background bana, na koi image mili")
+        return False
 
     hook_p = create_text_card_image(ai_data["hook_text"], 1000, 160, (220, 20, 50), (255, 255, 255), 60, "hook.png")
     price_tag = f"PRICE: {product_data['price']}" if product_data.get("has_real_price") else ai_data["key_feature"]
     price_p = create_text_card_image(price_tag, 920, 110, (0, 180, 80), (255, 255, 255), 45, "price.png")
     cta_p = create_text_card_image(ai_data["cta_text"], 980, 120, (20, 20, 20), (255, 215, 0), 45, "cta.png")
 
-    phrases = build_subtitle_phrases(ai_data["script"])
-    timings = compute_subtitle_timings(phrases, audio_dur)
+    phrases = build_caption_phrases(ai_data["script"])
+    caption_list = build_caption_track(phrases, compute_word_timings(phrases, audio_dur))
 
+    # ---- inputs: 0=background, 1=captions, 2/3/4=hook/price/cta, uske baad image cards, aakhir me audio ----
     if scroll_image:
-        inputs = ["-loop", "1", "-framerate", "25", "-t", f"{audio_dur}", "-i", scroll_image]
+        inputs = ["-loop", "1", "-framerate", str(fps), "-t", f"{audio_dur:.3f}", "-i", scroll_image]
     else:
-        inputs = ["-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={audio_dur}"]
-    for img in local_imgs:
-        inputs.extend(["-loop", "1", "-i", img])
-    inputs.extend(["-i", hook_p, "-i", price_p, "-i", cta_p])
-    for i, ph in enumerate(phrases):
-        sp = create_subtitle_card_image(ph, save_name=f"sub_{i}.png")
-        inputs.extend(["-i", sp])
-    inputs.extend(["-i", audio_path])
+        inputs = ["-f", "lavfi", "-i", f"color=c=0x15181f:s=1080x1920:r={fps}:d={audio_dur:.3f}"]
+    inputs += ["-f", "concat", "-safe", "0", "-i", caption_list]
+    inputs += ["-i", hook_p, "-i", price_p, "-i", cta_p]
+    cap_i, hook_i, price_i, cta_i = 1, 2, 3, 4
 
-    img_end = num_imgs
-    hook_i, price_i, cta_i = img_end + 1, img_end + 2, img_end + 3
-    sub_start = cta_i + 1
-    audio_i = sub_start + len(phrases)
-    fps = 25
+    # har scene barabar lamba; image us scene ke sirf IMG_SHOW_RATIO hisse me dikhti hai (bacha hua time sirf scroll)
+    # agar scroll background nahi bana to images hi content hain, isliye poore time dikhti hain
+    scene_len = audio_dur / len(cards) if cards else 0.0
+    show_ratio = IMG_SHOW_RATIO if scroll_image else 1.0
+    scenes, next_i = [], 5
+    for j, card in enumerate(cards):
+        if not card:
+            continue
+        show = scene_len * show_ratio
+        start = j * scene_len + (scene_len - show) * 0.3
+        inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{show:.3f}", "-i", card]
+        scenes.append((next_i, start, show))
+        next_i += 1
+    inputs += ["-i", audio_path]
+    audio_i = next_i
 
+    # ---- filter graph ----
     if scroll_image:
-        # website ka lamba screenshot upar se neeche smooth scroll hota hai (poori voice ki length me)
-        fg = f"[0:v]crop=1080:1920:0:'(ih-1920)*t/{audio_dur}',setsar=1,fps={fps}[bg];"
+        # website ka lamba screenshot upar se neeche seedha (bina blur) scroll hota hai, poori voice ki length me
+        fg = (f"[0:v]crop=1080:1920:0:'(ih-1920)*min(t/{audio_dur:.3f},1)',"
+              f"setsar=1,fps={fps},format=yuv420p[bg];")
     else:
-        fg = f"[0:v]scale=1080:1920,trim=0:{audio_dur},setpts=PTS-STARTPTS[bg];"
+        fg = f"[0:v]setsar=1,fps={fps},format=yuv420p[bg];"
     last = "bg"
-    for i in range(1, num_imgs + 1):
-        st, et = (i - 1) * per_img, i * per_img
-        frames = max(int(per_img * fps), 1)
-        z = "min(zoom+0.0015,1.25)" if i % 2 else "max(1.25-0.0015*on,1.0)"
-        nxt = f"v{i}"
-        fg += (
-            f"[{i}:v]trim=0:{per_img},setpts=PTS-STARTPTS,scale=1020:1020,"
-            f"zoompan=z='{z}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1020x1020,fps={fps}[img{i}];"
-            f"[{last}][img{i}]overlay=(W-w)/2:(H-h)/2:enable='between(t,{st},{et})'[{nxt}];"
-        )
-        last = nxt
 
-    fg += f"[{last}][{hook_i}:v]overlay=(W-w)/2:140[v1];"
-    fg += f"[v1][{price_i}:v]overlay=(W-w)/2:1420[v2];"
-    fg += f"[v2][{cta_i}:v]overlay=(W-w)/2:1600[v3];"
-    curr = "v3"
-    for i in range(len(phrases)):
-        st, et = timings[i]
-        nxt = f"vs{i}"
-        fg += f"[{curr}][{sub_start + i}:v]overlay=(W-w)/2:1290-h/2:enable='between(t,{st},{et})'[{nxt}];"
-        curr = nxt
-    fg = fg.rstrip(";")
+    base = CARD_WIDTH + 2 * CARD_PAD
+    for n, (idx, start, show) in enumerate(scenes):
+        fade_d = min(0.35, show / 4)
+        zoom = f"{base}*(1+0.06*t/{show:.3f})"  # halka zoom-in (6%)
+        fg += (
+            f"[{idx}:v]format=rgba,scale=w='{zoom}':h='{zoom}':eval=frame,"
+            f"fade=t=in:st=0:d={fade_d:.2f}:alpha=1,"
+            f"fade=t=out:st={show - fade_d:.3f}:d={fade_d:.2f}:alpha=1,"
+            f"setpts=PTS+{start:.3f}/TB[im{n}];"
+            f"[{last}][im{n}]overlay=x='(W-w)/2':y='{CARD_CENTER_Y}-h/2':eof_action=pass:"
+            f"enable='between(t,{start:.3f},{start + show:.3f})'[s{n}];"
+        )
+        last = f"s{n}"
+
+    fg += f"[{last}][{hook_i}:v]overlay=(W-w)/2:140[h1];"
+    fg += f"[h1][{price_i}:v]overlay=(W-w)/2:1420[h2];"
+    fg += f"[h2][{cta_i}:v]overlay=(W-w)/2:1600[h3];"
+    # caption sabse upar (image card ke neeche wali jagah par), taaki kabhi ढके nahi
+    fg += f"[{cap_i}:v]fps={fps},format=rgba[cap];"
+    fg += f"[h3][cap]overlay=(W-w)/2:{CAPTION_CENTER_Y}-h/2:eof_action=pass,format=yuv420p[outv]"
 
     cmd = [
         "ffmpeg", "-y", *inputs, "-filter_complex", fg,
-        "-map", f"[{curr}]", "-map", f"{audio_i}:a",
+        "-map", "[outv]", "-map", f"{audio_i}:a",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-shortest", output_video_path,
     ]
@@ -630,7 +687,7 @@ def create_vertical_reel_ffmpeg(product_data, ai_data, audio_path, output_video_
     if res.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 500000:
         logging.info(f"✅ Reel OK: {output_video_path}")
         return True
-    logging.error(f"❌ FFmpeg fail: {res.stderr[-500:] if res.stderr else 'unknown'}")
+    logging.error(f"❌ FFmpeg fail: {res.stderr[-1500:] if res.stderr else 'unknown'}")
     return False
 
 

@@ -770,6 +770,117 @@ def upload_video_for_direct_link(video_path):
     return None
 
 
+# ================= 7b. YOUTUBE (Shorts, unlisted) =================
+YT_PRIVACY = "unlisted"  # hamesha unlisted
+YT_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+
+
+def build_youtube_credentials():
+    """GitHub secrets (YT_CLIENT_SECRETS_JSON + YT_TOKEN_JSON) se Google credentials banata hai. Secrets na hon to None."""
+    secrets_raw = os.environ.get("YT_CLIENT_SECRETS_JSON", "").strip()
+    token_raw = os.environ.get("YT_TOKEN_JSON", "").strip()
+    if not secrets_raw or not token_raw:
+        return None
+    from google.oauth2.credentials import Credentials
+
+    client_cfg = json.loads(secrets_raw)
+    client_cfg = client_cfg.get("installed") or client_cfg.get("web") or client_cfg
+    token_info = json.loads(token_raw)
+
+    refresh_token = token_info.get("refresh_token")
+    if not refresh_token:
+        raise ValueError("YT_TOKEN_JSON me refresh_token nahi hai")
+    return Credentials(
+        token=token_info.get("token") or token_info.get("access_token"),
+        refresh_token=refresh_token,
+        token_uri=token_info.get("token_uri") or client_cfg.get("token_uri") or "https://oauth2.googleapis.com/token",
+        client_id=token_info.get("client_id") or client_cfg.get("client_id"),
+        client_secret=token_info.get("client_secret") or client_cfg.get("client_secret"),
+        scopes=token_info.get("scopes") or [YT_SCOPE],
+    )
+
+
+def build_youtube_title(ai_data, product_data):
+    """Title wahi jo Facebook/Instagram caption me jata hai (AI caption) + #Shorts. Max 100 characters."""
+    raw = (ai_data.get("caption") or product_data.get("title") or "Best Deal").strip().splitlines()[0]
+    raw = re.sub(r"[<>]", "", raw)
+    raw = re.sub(r"#shorts\b", "", raw, flags=re.I).strip()
+    suffix = " #Shorts"
+    if len(raw) + len(suffix) > 100:
+        raw = raw[: 100 - len(suffix)].rstrip()
+    return (raw + suffix).strip()
+
+
+def build_youtube_metadata(product_data, ai_data, buy_url):
+    caption = re.sub(r"[<>]", "", ai_data.get("caption") or product_data.get("title") or "")
+    description = f"{caption}\n\nBuy Here: {buy_url}\n\n#Shorts"
+    tags = [t for t in dict.fromkeys(re.findall(r"#(\w+)", caption)) if t.lower() != "shorts"][:10]
+    tags = tags + [t for t in ["Shorts", "deals", "review"] if t not in tags]
+    return {
+        "snippet": {
+            "title": build_youtube_title(ai_data, product_data),
+            "description": description[:4900],
+            "tags": tags,
+            "categoryId": "28",  # Science & Technology
+        },
+        "status": {
+            "privacyStatus": YT_PRIVACY,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+
+def upload_to_youtube(video_path, product_data, ai_data, buy_url, youtube=None):
+    """Reel ko YouTube par Shorts (unlisted) ki tarah upload karta hai. Fail hone par baaki bot nahi rukta."""
+    try:
+        if youtube is None:
+            creds = build_youtube_credentials()
+            if creds is None:
+                logging.info("ℹ️ YT_CLIENT_SECRETS_JSON / YT_TOKEN_JSON nahi mile, YouTube upload skip")
+                return None
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+
+            creds.refresh(Request())
+            youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+        from googleapiclient.http import MediaFileUpload
+        from googleapiclient.errors import HttpError
+
+        logging.info("📺 YouTube upload shuru...")
+        body = build_youtube_metadata(product_data, ai_data, buy_url)
+        media = MediaFileUpload(video_path, mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+        response, retries = None, 0
+        while response is None:
+            try:
+                _, response = request.next_chunk()
+            except HttpError as e:
+                if e.resp.status in (500, 502, 503, 504) and retries < 5:
+                    retries += 1
+                    logging.warning(f"⚠️ YouTube {e.resp.status}, retry {retries}/5")
+                    time.sleep(2 ** retries)
+                    continue
+                raise
+
+        video_id = response.get("id")
+        if not video_id:
+            raise RuntimeError(f"YouTube ne video id nahi di: {response}")
+        yt_url = f"https://www.youtube.com/shorts/{video_id}"
+        logging.info(f"✅ YouTube upload OK (unlisted): {yt_url}")
+        notify_telegram(f"📺 YouTube Shorts (unlisted) upload ho gaya\n🎬 {body['snippet']['title']}\n🔗 {yt_url}")
+        return yt_url
+    except Exception as e:
+        logging.error(f"❌ YouTube upload fail: {e}")
+        hint = ""
+        if "invalid_grant" in str(e):
+            hint = "\nToken expire/revoke ho gaya hai. YT_TOKEN_JSON dobara banakar secret me daalo " \
+                   "(OAuth consent screen 'Testing' me ho to token 7 din me expire hota hai)."
+        notify_telegram(f"❌ YouTube upload fail\n<code>{str(e)[:300]}</code>{hint}")
+        return None
+
+
 # ================= 8. BUFFER =================
 def get_buffer_channels():
     url = "https://api.buffer.com"
@@ -929,6 +1040,9 @@ async def process_and_publish(buy_url):
     if not create_vertical_reel_ffmpeg(product, ai_data, audio_path, video_path, scroll_image=scroll_image):
         notify_telegram("❌ Video fail")
         return
+
+    # YouTube Shorts (unlisted) -- Buffer se alag chalta hai, ek fail ho to doosra nahi rukta
+    upload_to_youtube(video_path, product, ai_data, buy_url)
 
     link = upload_video_for_direct_link(video_path)
     if link and BUFFER_ACCESS_TOKEN:

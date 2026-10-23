@@ -1,0 +1,106 @@
+From c34b3173dd244983c71698d2b33009088f825d01 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 23 Oct 2026 11:41:32 +0000
+Subject: [PATCH] Add Groq fallback after Gemini keys
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HBgffB1uA9xF5WxTPp9nWz
+---
+ .github/workflows/reels-bot.yml |  1 +
+ README_SETUP_reels.md           |  1 +
+ reels_bot.py                    | 36 +++++++++++++++++++++++++++++++++
+ requirements.txt                |  1 +
+ 4 files changed, 39 insertions(+)
+
+diff --git a/.github/workflows/reels-bot.yml b/.github/workflows/reels-bot.yml
+index 0287335..b90c5a2 100644
+--- a/.github/workflows/reels-bot.yml
++++ b/.github/workflows/reels-bot.yml
+@@ -77,6 +77,7 @@ jobs:
+           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
++          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+           YT_CLIENT_SECRETS_JSON: ${{ secrets.YT_CLIENT_SECRETS_JSON }}
+           YT_TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+diff --git a/README_SETUP_reels.md b/README_SETUP_reels.md
+index c37ed2f..f83a2da 100644
+--- a/README_SETUP_reels.md
++++ b/README_SETUP_reels.md
+@@ -22,6 +22,7 @@ telegram_check.py
+ | `BUFFER_ACCESS_TOKEN`      | आपका Buffer API token                        |
+ | `TELEGRAM_BOT_TOKEN`       | Telegram बॉट token                           |
+ | `TELEGRAM_CHAT_ID`         | आपकी chat id                                 |
++| `GROQ_API_KEY`             | Groq key (Gemini fail होने पर backup)         |
+ 
+ (Buffer में पहले से Instagram, Facebook, Pinterest channels **connect** होने चाहिए — bot वहीं पोस्ट भेजेगा।)
+ 
+diff --git a/reels_bot.py b/reels_bot.py
+index 039b083..62080bf 100644
+--- a/reels_bot.py
++++ b/reels_bot.py
+@@ -22,6 +22,17 @@ client = Client()
+ BUFFER_ACCESS_TOKEN = os.environ.get("BUFFER_ACCESS_TOKEN", "")
+ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+ GEMINI_API_KEY_2 = os.environ.get("GEMINI_API_KEY_2", "").strip()
++
++# Groq — Gemini keys fail hone par fallback
++GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
++GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
++GROQ_CLIENT = None
++if GROQ_API_KEY:
++    try:
++        from groq import Groq
++        GROQ_CLIENT = Groq(api_key=GROQ_API_KEY)
++    except Exception as _e:
++        print(f"⚠️ Groq client nahi bana: {_e}")
+ OUTPUT_DIR = "generated_reels"
+ os.makedirs(OUTPUT_DIR, exist_ok=True)
+ DEFAULT_FALLBACK_IMAGE = "https://via.placeholder.com/1080x1920.png?text=Product+Image"
+@@ -288,6 +299,31 @@ Return ONLY valid JSON:
+         except Exception as e:
+             logging.warning(f"⚠️ Gemini key #{idx}: {e}")
+ 
++    if GROQ_CLIENT:
++        logging.info("🔄 Gemini failed. Switching to Groq...")
++        for g_model in GROQ_MODELS:
++            for attempt in range(1, 4):
++                try:
++                    logging.info(f"🤖 Groq {g_model} attempt {attempt}/3...")
++                    res = GROQ_CLIENT.chat.completions.create(
++                        model=g_model,
++                        messages=[{"role": "user", "content": prompt}],
++                        temperature=0.7,
++                        max_tokens=2048,
++                        response_format={"type": "json_object"},
++                    )
++                    raw = res.choices[0].message.content.strip()
++                    clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
++                    start, end = clean.find("{"), clean.rfind("}")
++                    if start != -1 and end != -1:
++                        clean = clean[start : end + 1]
++                    parsed = json.loads(clean)
++                    logging.info(f"✅ Groq ({g_model}) OK")
++                    return _normalize(parsed)
++                except Exception as e:
++                    logging.warning(f"⚠️ Groq {g_model} attempt {attempt}: {e}")
++                    time.sleep(2)
++
+     try:
+         logging.info("🤖 g4f fallback...")
+         res = client.chat.completions.create(
+diff --git a/requirements.txt b/requirements.txt
+index e5bd549..39c6dfa 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,5 +1,6 @@
+ requests
+ g4f
++groq
+ edge-tts
+ gTTS
+ beautifulsoup4
+-- 
+2.43.0
+
